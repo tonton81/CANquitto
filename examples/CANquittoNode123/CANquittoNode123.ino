@@ -3,6 +3,7 @@
 
 void setup() {
   pinMode(2, OUTPUT); // for the transceiver enable pin
+  pinMode(13, OUTPUT); // enable led pin
   Can0.setBaudRate(1000000);
   Can0.enableFIFO();
   Can0.enableFIFOInterrupt();
