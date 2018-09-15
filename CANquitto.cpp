@@ -225,7 +225,7 @@ uint16_t ext_events() {
     CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
     CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
 
-    /* ################## WE FOUND A COMPLETED TRANSFER! ATTEMPTING REBUILD... #################### */
+    /* ################## IF WE FOUND A COMPLETED TRANSFER! ATTEMPTING REBUILD... #################### */
     if ( ((((uint16_t)transfer_buf[1] << 8 | transfer_buf[2]) >> 6) & 0x7) == 3 ) {
       /* ####### HERE WE MODIFY THE BITS NEEDED TO DO RUN A CIRCULAR_BUFFER FIND MATCHING ARRAY ####### */
       transfer_buf[2] &= ~(1 << 7);
@@ -243,12 +243,13 @@ uint16_t ext_events() {
         masked_id = transfer_buf[0] << 24 | transfer_buf[1] << 16 | transfer_buf[2] << 8 | transfer_buf[3];
         masked_id &= 0x1FFE3FFF;
 
-        /* ######### WE COPY THE LWN & CRC FROM THE FIRST FRAME SEQUENCE WE FOUND ABOVE ######### */
+        /* ######### WE COPY THE LEN & CRC FROM THE FIRST FRAME SEQUENCE WE FOUND ABOVE ######### */
         payload_length = ((uint16_t)transfer_buf[6] << 8 | transfer_buf[7]);
         payload_checksum = ((uint16_t)transfer_buf[8] << 8 | transfer_buf[9]);
         uint8_t payload[payload_length];
         uint8_t packetid = transfer_buf[10];
         uint32_t shift_array = 0;
+        bool found = 0;
 
         _available = CANquitto::secondaryBuffer.size();
         for ( uint32_t i = 0; i < _available; i++ ) {
@@ -260,10 +261,12 @@ uint16_t ext_events() {
             if ( ((((uint16_t)transfer_buf[4]) & 0xF) << 8 | transfer_buf[5]) != i || ( masked_id != _id ) ) {
               CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
               CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
+              continue;
             }
-            else break;
+            found = 1;
           }
 
+          if ( !found ) Serial.println("ERROR!!!");
 
           /* ######### HERE WE MAKE SURE WE HAVE THE CORRECT SPECIFIC NODE FOR RECEPTION ######### */
           _id = transfer_buf[0] << 24 | transfer_buf[1] << 16 | transfer_buf[2] << 8 | transfer_buf[3];
