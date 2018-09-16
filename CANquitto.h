@@ -48,7 +48,7 @@ class CANquitto {
   public:
     CANquitto() {;}
     bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
-    bool write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000);
+    uint8_t write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000);
     volatile uint32_t write_ack_valid = 1;
     volatile uint32_t write_id_validate = 0;
     uint32_t nodeNetID = 0x8FFFFFF & 0x1FFE0000;
