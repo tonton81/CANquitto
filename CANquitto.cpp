@@ -50,9 +50,10 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
   return 0;
 }
 
-bool CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time) {
+uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time) {
   if ( !length || length > 8100) return 0;
 
+  write_ack_valid = 0;
   write_id_validate = dest_node;
 
   length += 5;
@@ -93,19 +94,16 @@ bool CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, 
     else if ( j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
     Can0.write(_send);
-    if ( j == (buf_levels - 2) ) write_ack_valid = 0;
     delayMicroseconds(delay_send);
   }
 
   uint32_t timeout = millis();
   while ( !write_ack_valid ) {
-    if ( millis() - timeout > wait_time ) {
-      break;
-    }
+    if ( millis() - timeout > wait_time ) break;
   }
 
-  if ( write_ack_valid == 0x06 ) return 1;
-  write_ack_valid = 1; // keep it set
+  if ( write_ack_valid ) return write_ack_valid;
+  write_ack_valid = 0xFF; // keep it set
   return 0;
 }
 
@@ -163,19 +161,18 @@ void ext_output(const CAN_message_t &msg) {
 
   /* ######### WE RECEIVED STATUS/RESPONSE UPDATES, UPDATE VARIABLES ######### */
   if ( msg.id == ((Node.nodeNetID & 0x1FFE0000) | Node.write_id_validate | Node.nodeID << 7 | 4 << 14) ) {
-
-    if ( Node.write_ack_valid ) return;
-
     switch ( msg.buf[0] ) {
       case 0: { /* NODE RESPONSE ACK/NAK */
+          if ( Node.write_ack_valid ) break;
           Node.write_ack_valid = msg.buf[1];
           break;
         }
-
     }
     return;
   }
 
+
+  /* ######### WE'RE RECEIVING A PAYLOAD FOR THIS NODE ######### */
   if ( ( (msg.id & 0x3F80) >> 7 ) == Node.nodeID ) { /* something is for this node! */
     uint8_t buf[12] = { (uint8_t)(msg.id >> 24), (uint8_t)(msg.id >> 16),
                         (uint8_t)(msg.id >> 8), (uint8_t)msg.id , msg.buf[0], msg.buf[1], msg.buf[2],
@@ -183,7 +180,7 @@ void ext_output(const CAN_message_t &msg) {
                       };
 
     /* ######### IF WE GET A START FRAME, CLEAR CURRENT NODE FRAMES FROM BOTH QUEUES ######### */
-    if ( ( ( ( msg.id & 0x1C000 ) >> 14) &0x7 ) == 1 ) {
+    if ( ( ( ( msg.id & 0x1C000 ) >> 14) & 0x7 ) == 1 ) {
       uint32_t _available = CANquitto::primaryBuffer.size();
       uint32_t masked_id = msg.id & 0x1FFE3FFF;
       uint8_t transfer_buf[12];
@@ -197,11 +194,15 @@ void ext_output(const CAN_message_t &msg) {
         if ( masked_id != ( msg.id & 0x1FFE3FFF ) ) CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
       }
     }
-
+    /* ######### QUEUE THE FRAME ######### */
     CANquitto::primaryBuffer.push_back(buf, 12);
 
   }
 }
+
+
+
+
 
 uint16_t ext_events() {
   uint8_t search[12]; /* buffer is recycled throughout the entire function */
@@ -288,7 +289,6 @@ uint16_t ext_events() {
     _id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
     if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
   }
-
 
   return 0;
 }
