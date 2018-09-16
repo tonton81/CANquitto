@@ -34,7 +34,7 @@
 #include "circular_buffer.h"
 #include "IFCT.h"
 
-#define CANQUITTO_BUFFER_SIZE 32
+#define CANQUITTO_BUFFER_SIZE 64
 
 struct AsyncCQ {
   uint8_t node = 0;
@@ -55,12 +55,12 @@ class CANquitto {
     uint8_t nodeID = 1;
     volatile uint32_t is_processing = 0;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE, 12> primaryBuffer;
-    static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*64, 12> secondaryBuffer;
+    static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*8, 12> secondaryBuffer;
     void onReceive(_CQ_ptr handler) { CANquitto::_handler = handler; }
     static _CQ_ptr _handler;
+    bool _enabled = 1;
 
   private:
-    bool _enabled = 1;
 
 };
 
