@@ -53,6 +53,7 @@ class CANquitto {
     volatile uint32_t write_id_validate = 0;
     uint32_t nodeNetID = 0x8FFFFFF & 0x1FFE0000;
     uint8_t nodeID = 1;
+    volatile uint32_t is_processing = 0;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE, 12> primaryBuffer;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*64, 12> secondaryBuffer;
     void onReceive(_CQ_ptr handler) { CANquitto::_handler = handler; }
