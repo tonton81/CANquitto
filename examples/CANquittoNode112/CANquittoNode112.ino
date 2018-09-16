@@ -16,7 +16,7 @@ void loop() {
   // put your main code here, to run repeatedly:
     uint8_t buf[200];
     for ( uint32_t i = 0; i < sizeof(buf); i++ ) buf[i] = random(0, 255); // i + 1;
-    if (Node.write(buf, sizeof(buf), 123, 2000, 3000)) digitalWrite(13, !digitalRead(13));
+    if (Node.write(buf, sizeof(buf), 123, 2000, 3000)==0x06) digitalWrite(13, !digitalRead(13));
     delay(100);
 }
 
