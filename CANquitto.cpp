@@ -34,7 +34,7 @@
 
 CANquitto Node = CANquitto();
 Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE, 12> CANquitto::primaryBuffer;
-Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*64, 12> CANquitto::secondaryBuffer;
+Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*8, 12> CANquitto::secondaryBuffer;
 _CQ_ptr CANquitto::_handler = nullptr;
 
 
@@ -51,7 +51,7 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
 }
 
 uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time) {
-  if ( !length || length > 8100) return 0;
+  if ( !length || !_enabled || length > 8100) return 0;
 
   write_id_validate = dest_node;
 
@@ -153,6 +153,7 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
 
 
 void ext_output(const CAN_message_t &msg) {
+  if ( !Node._enabled ) return;
 
   /* ######### REJECT UNKNOWN NODE FRAMES ######### */
   if ( ( msg.id & 0x1FFE0000 ) != ( Node.nodeNetID & 0x1FFE0000 ) ) return;
@@ -214,12 +215,19 @@ void ext_output(const CAN_message_t &msg) {
 
 
 uint16_t ext_events() {
+  if ( !Node._enabled ) return 0;
   uint8_t search[12]; /* buffer is recycled throughout the entire function */
 
   /* ######### IF COMPLETED FRAME NOT FOUND, EXIT IMMEDIATELY ######### */
   search[2] = ( Node.nodeID >> 1) | ( 3 << 6 );
   if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
   uint16_t limit = (uint16_t)( search[4] & 0xF ) | (search[5] + 1);
+  uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
+
+  CAN_message_t response;
+  response.ext = response.seq = 1;
+  response.id = Node.nodeNetID | (masked_id & 0x7F) << 7 | Node.nodeID | 4 << 14;
+
 
   /* ######### GOTO FIRST FRAME FOR VARIABLE SETTINGS, EXIT IMMEDIATELY IF ERROR ######### */
   search[2] = ( Node.nodeID >> 1) | ( 1 << 6 );
@@ -227,7 +235,6 @@ uint16_t ext_events() {
 
   Node.is_processing = 1;
 
-  uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
   uint32_t _id = 0;
   uint16_t find_len = ((uint16_t)search[6] << 8 | search[7]);
   uint16_t find_crc = ((uint16_t)search[8] << 8 | search[9]);
@@ -238,9 +245,6 @@ uint16_t ext_events() {
   memmove_shift += (search[4] >> 4) - 5;
 
   uint16_t crc_check = 0;
-  CAN_message_t response;
-  response.ext = response.seq = 1;
-  response.id = Node.nodeNetID | (masked_id & 0x7F) << 7 | Node.nodeID | 4 << 14;
 
   for ( uint16_t i = 1; i < limit; i++ ) {
     search[4] = (search[4] & ~(0xF)) | ((i & 0xF00) >> 8);
@@ -291,7 +295,6 @@ uint16_t ext_events() {
     _id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
     if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
   }
-
   Node.is_processing = 0;
   return 0;
 }
