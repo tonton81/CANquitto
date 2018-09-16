@@ -15,7 +15,7 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   char buf[] = "Hello World! Hello Teensy! Hello IFCT!";
-  if (Node.write((const uint8_t*)buf, sizeof(buf), 112, 11, 2000, 3000)) digitalWrite(13, !digitalRead(13));
+  if (Node.write((const uint8_t*)buf, sizeof(buf), 112, 11, 2000, 3000)==0x06) digitalWrite(13, !digitalRead(13));
   delay(100);
 }
 
