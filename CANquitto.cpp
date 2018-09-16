@@ -93,8 +93,8 @@ bool CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, 
     else if ( j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
     Can0.write(_send);
-    delayMicroseconds(delay_send);
     if ( j == (buf_levels - 2) ) write_ack_valid = 0;
+    delayMicroseconds(delay_send);
   }
 
   uint32_t timeout = millis();
@@ -167,7 +167,7 @@ void ext_output(const CAN_message_t &msg) {
     if ( Node.write_ack_valid ) return;
 
     switch ( msg.buf[0] ) {
-      case 0: { /* NODE TRANSFER RESPONSE ACK */
+      case 0: { /* NODE RESPONSE ACK/NAK */
           Node.write_ack_valid = msg.buf[1];
           break;
         }
@@ -182,7 +182,6 @@ void ext_output(const CAN_message_t &msg) {
                         msg.buf[3], msg.buf[4], msg.buf[5], msg.buf[6], msg.buf[7]
                       };
 
-
     /* ######### IF WE GET A START FRAME, CLEAR CURRENT NODE FRAMES FROM BOTH QUEUES ######### */
     if ( ( ( ( msg.id & 0x1C000 ) >> 14) &0x7 ) == 1 ) {
       uint32_t _available = CANquitto::primaryBuffer.size();
@@ -190,145 +189,106 @@ void ext_output(const CAN_message_t &msg) {
       uint8_t transfer_buf[12];
       for ( uint32_t c = 0; c < _available; c++ ) {
         CANquitto::primaryBuffer.pop_front(transfer_buf, 12);
-        if ( masked_id != msg.id & 0x1FFE3FFF ) CANquitto::primaryBuffer.push_back(transfer_buf, 12);
+        if ( masked_id != ( msg.id & 0x1FFE3FFF ) ) CANquitto::primaryBuffer.push_back(transfer_buf, 12);
       }
       _available = CANquitto::secondaryBuffer.size();
       for ( uint32_t c = 0; c < _available; c++ ) {
         CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
-        if ( masked_id != msg.id & 0x1FFE3FFF ) CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
+        if ( masked_id != ( msg.id & 0x1FFE3FFF ) ) CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
       }
     }
 
-
-
     CANquitto::primaryBuffer.push_back(buf, 12);
+
   }
 }
 
 uint16_t ext_events() {
-  uint8_t transfer_buf[12]; /* buffer is recycled throughout the entire function */
+  uint8_t search[12]; /* buffer is recycled throughout the entire function */
 
   /* ################## TAKE ALL DATA FROM PRIMARY BUFFER (CONSUMER ONLY) ######################## */
   /* ################## AND PUSH IT TO SECONDARY BUFFER (CONSUMER & PRODUCER) #################### */
   uint32_t primary_available = CANquitto::primaryBuffer.size();
   for ( uint32_t p = 0; p < primary_available; p++ ) {
-    CANquitto::primaryBuffer.pop_front(transfer_buf, 12);
-    CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
+    CANquitto::primaryBuffer.pop_front(search, 12);
+    CANquitto::secondaryBuffer.push_back(search, 12);
   }
 
-  uint32_t cycle_size = 0, payload_checksum = 0, checksum = 0, payload_length = 0, _id = 0, masked_id = 0;
-  uint32_t _available = CANquitto::secondaryBuffer.size();
 
-  /* ####### WE START ROLLING THE BUFFER UNTIL THE LAST FRAME IS FOUND (END OF NODE TRANSFER) ####### */
-  while ( cycle_size < _available ) {
-    cycle_size++;
-    CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
-    CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
+  /* ######### IF COMPLETED FRAME NOT FOUND, EXIT IMMEDIATELY ######### */
+  search[2] = ( Node.nodeID >> 1) | ( 3 << 6 );
+  if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
+  uint16_t limit = (uint16_t)( search[4] & 0xF ) | (search[5] + 1);
 
-    /* ################## IF WE FOUND A COMPLETED TRANSFER! ATTEMPTING REBUILD... #################### */
-    if ( ((((uint16_t)transfer_buf[1] << 8 | transfer_buf[2]) >> 6) & 0x7) == 3 ) {
-      /* ####### HERE WE MODIFY THE BITS NEEDED TO DO RUN A CIRCULAR_BUFFER FIND MATCHING ARRAY ####### */
-      transfer_buf[2] &= ~(1 << 7);
-      transfer_buf[5] = 0;
+  /* ######### GOTO FIRST FRAME FOR VARIABLE SETTINGS, EXIT IMMEDIATELY IF ERROR ######### */
+  search[2] = ( Node.nodeID >> 1) | ( 1 << 6 );
+  if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
 
-      /* ################## IF WE HAVE A MATCHING FIRST FRAME, BEGIN PROCESSING #################### */
-      if (CANquitto::secondaryBuffer.find(transfer_buf, 12, 0, 1, 2, 3, 5)) {
+  uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
+  uint32_t _id = 0;
+  uint16_t find_len = ((uint16_t)search[6] << 8 | search[7]);
+  uint16_t find_crc = ((uint16_t)search[8] << 8 | search[9]);
 
-        /* ######### THIS IS NEEDED SINCE THE FIND METHOD SEARCHES THE INDICE AS WHOLE ######### */
-        /* ######### AND NOT BY BITS. WE NEED COUNTER TO MATCH 12 LSB BITS OF 2 BYTES. ######### */
-        /* ######### NOT JUST THE SECOND BYTE (FOR LARGE ARRAYS BIGGER THAN 256 BYTES! ######### */
-        if ( ((((uint16_t)transfer_buf[4]) & 0xF) << 8 | transfer_buf[5]) != 0 ) continue; /* 12 bits must be == 0 */
+  uint16_t memmove_shift = 0;
+  uint8_t find_packetid = search[10], payload_transfer[find_len];
+  memmove(&payload_transfer[memmove_shift], &search[11], (search[4] >> 4) );
+  memmove_shift += (search[4] >> 4) - 5;
 
-        /* ##### WE MASK OUT THE CONTROL BITS FROM THE ID AND LOCK ONLY TO THIS SPECIFIC NODE'S FRAMES ##### */
-        masked_id = transfer_buf[0] << 24 | transfer_buf[1] << 16 | transfer_buf[2] << 8 | transfer_buf[3];
-        masked_id &= 0x1FFE3FFF;
+  uint16_t crc_check = 0;
+  CAN_message_t response;
+  response.ext = response.seq = 1;
+  response.id = Node.nodeNetID | (masked_id & 0x7F) << 7 | Node.nodeID | 4 << 14;
 
-        /* ######### WE COPY THE LEN & CRC FROM THE FIRST FRAME SEQUENCE WE FOUND ABOVE ######### */
-        payload_length = ((uint16_t)transfer_buf[6] << 8 | transfer_buf[7]);
-        payload_checksum = ((uint16_t)transfer_buf[8] << 8 | transfer_buf[9]);
-        uint8_t payload[payload_length];
-        uint8_t packetid = transfer_buf[10];
-        uint32_t shift_array = 0;
-        bool found = 0;
+  for ( uint16_t i = 1; i < limit; i++ ) {
+    search[4] = (search[4] & ~(0xF)) | ((i & 0xF00) >> 8);
+    search[5] = i;
 
-        _available = CANquitto::secondaryBuffer.size();
-        for ( uint32_t i = 0; i < _available; i++ ) {
+    if ( i < ( limit - 1 ) ) {
+      if (CANquitto::secondaryBuffer.find(search, 12, 3, 4, 5)) {
+        memmove(&payload_transfer[memmove_shift], &search[6], (search[4] >> 4) );
+        memmove_shift += (search[4] >> 4);
+      }
+      else {
+        response.buf[1] = 0x15;
+        Can0.write(response);
+        break; // ERROR! CLEAR NODE FRAMES!
+      }
+    }
+    else {
+      search[2] |= (3 << 6);
+      search[5] = i;
 
-          /* ##### WE THEN LOOK FOR THE CONSECUTIVE FRAMES IN ORDER, LOOK FOR CORRECT 12 BIT FIELD ##### */
-          for ( uint32_t o = 0; o < _available; o++ ) {
-            _id = transfer_buf[0] << 24 | transfer_buf[1] << 16 | transfer_buf[2] << 8 | transfer_buf[3];
-            _id &= 0x1FFE3FFF;
-            if ( ((((uint16_t)transfer_buf[4]) & 0xF) << 8 | transfer_buf[5]) != i || ( masked_id != _id ) ) {
-              CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
-              CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
-              continue;
-            }
-            found = 1;
-          }
+      if (CANquitto::secondaryBuffer.find(search, 12, 2, 3, 5)) {
+        memmove(&payload_transfer[memmove_shift], &search[6], (search[4] >> 4) );
+        memmove_shift += (search[4] >> 4);
 
-          if ( !found ) Serial.println("ERROR!!!");
+        for ( uint32_t i = 0; i < find_len; i++ ) crc_check ^= payload_transfer[i];
 
-          /* ######### HERE WE MAKE SURE WE HAVE THE CORRECT SPECIFIC NODE FOR RECEPTION ######### */
-          _id = transfer_buf[0] << 24 | transfer_buf[1] << 16 | transfer_buf[2] << 8 | transfer_buf[3];
-          _id &= 0x1FFE3FFF;
-
-
-          /* ##### IF THE 12 BITS MATCH SEQUENCE AND THE NODE MASK MATCHES THE COMPLETE MESSAGE FRAME ##### */
-          if ( ((((uint16_t)transfer_buf[4]) & 0xF) << 8 | transfer_buf[5]) == i && ( masked_id == _id ) ) {
-            /* ######### WE ATTEMPT TO REMOVE THE FRAME FROM QUEUE WHILE PROCESSING ######### */
-            /* ######### THE FRAME COULD BE IN FRONT OR BACK OF QUEUE, IT DEPENDS IF THE QUEUE ROLLED ######### */
-            if ( CANquitto::secondaryBuffer.peek_front()[5] == transfer_buf[5] ) CANquitto::secondaryBuffer.pop_front();
-            if ( CANquitto::secondaryBuffer.peek_back()[5] == transfer_buf[5] ) CANquitto::secondaryBuffer.pop_back();
-
-            /* ##### FOR THE FIRST FRAME, WE REMOVE THE APPENDED LEN AND CRC FROM THE TRANSFER PACKET PAYLOAD ##### */
-            if ( !i ) {
-              memmove(&payload[shift_array], &transfer_buf[11], (transfer_buf[4] >> 4) );
-              shift_array += (transfer_buf[4] >> 4) - 5;
-            }
-            /* ##### FOR THE REST OF THE SEQUENCES, RUN THEM AS NORMAL ##### */
-            else {
-              memmove(&payload[shift_array], &transfer_buf[6], (transfer_buf[4] >> 4) );
-              shift_array += (transfer_buf[4] >> 4);
-            }
-          }
-        }
-
-        /* ######### WE REMOVE ANY STRAY FRAMES THAT MAY BE IN BUFFER FOR THAT SPECIFIC NODE ######### */
-        /* ######### STALE FRAMES COULD BE INCOMPLETE PAYLOADS FROM A NODE WHEN IT WAS RESET ######### */
-        /* ######### THUS THE FRAMES SIT IN QUEUE WHILE NEW ONES ENTER ON NEXT TRANSMISSION. ######### */
-        /* ######### NOTE: YOU MAY GET A NAK AS AFTER IT FAILS CRC USING STALE FRAMES ON BOOT ######### */
-        /* #########       THE REST OF IT'S FRAMES WOULD BE DROPPED AND START FRESH AGAIN ######### */
-        _available = CANquitto::secondaryBuffer.size();
-        for ( uint32_t c = 0; c < _available; c++ ) {
-          CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
-          _id = transfer_buf[0] << 24 | transfer_buf[1] << 16 | transfer_buf[2] << 8 | transfer_buf[3];
-          _id &= 0x1FFE3FFF;
-          if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
-        }
-
-        /* ######### WE BEGIN A MESSAGE FRAME TO SEND AN ACK/NAK RESPONSE TO NODE ######### */
-        CAN_message_t msg;
-        msg.ext = msg.seq = 1;
-        msg.id = Node.nodeNetID | (masked_id & 0x7F) << 7 | Node.nodeID | 4 << 14;
-
-
-        /* ######### IF THE CHECKSUM PASSES, SEND BACK AN ACK AND FIRE A CALLBACK ######### */
-        for ( uint32_t i = 0; i < payload_length; i++ ) checksum ^= payload[i];
-        if ( checksum == payload_checksum ) {
-          msg.buf[1] = 0x06;
-          Can0.write(msg);
+        if ( crc_check == find_crc ) {
+          response.buf[1] = 0x06;
+          Can0.write(response);
           AsyncCQ info;
           info.node = (masked_id & 0x7F);
-          info.packetid = packetid;
-          if ( CANquitto::_handler ) CANquitto::_handler(payload, payload_length, info);
-          return 1;
+          info.packetid = find_packetid;
+          if ( CANquitto::_handler ) CANquitto::_handler(payload_transfer, find_len, info);
         }
-        /* ######### IF THE CHECKSUM FAILS, SEND BACK A NAK ######### */
-        msg.buf[1] = 0x15;
-        Can0.write(msg);
-        return 0;
+        else {
+          response.buf[1] = 0x15;
+          Can0.write(response);
+        }
+        break;
       }
     }
   }
+
+  /* ######### CLEAR NODE'S FRAMES FROM QUEUE ######### */
+  uint32_t _available = CANquitto::secondaryBuffer.size();
+  for ( uint32_t c = 0; c < _available; c++ ) {
+    CANquitto::secondaryBuffer.pop_front(search, 12);
+    _id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
+    if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
+  }
+
+
   return 0;
 }
