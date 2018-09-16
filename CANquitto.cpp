@@ -53,7 +53,6 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
 uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time) {
   if ( !length || length > 8100) return 0;
 
-  write_ack_valid = 0;
   write_id_validate = dest_node;
 
   length += 5;
@@ -87,13 +86,13 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
   CAN_message_t _send;
   _send.ext = _send.seq = 1;
 
-
   for ( uint16_t j = 0; j < buf_levels; j++ ) {
     if ( !j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 1 << 14;
     else if ( j == ( buf_levels - 1 ) ) _send.id = nodeNetID | dest_node << 7 | nodeID | 3 << 14;
     else if ( j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
     Can0.write(_send);
+    if ( j == (buf_levels - 2) ) write_ack_valid = 0;
     delayMicroseconds(delay_send);
   }
 
@@ -194,8 +193,18 @@ void ext_output(const CAN_message_t &msg) {
         if ( masked_id != ( msg.id & 0x1FFE3FFF ) ) CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
       }
     }
+
     /* ######### QUEUE THE FRAME ######### */
-    CANquitto::primaryBuffer.push_back(buf, 12);
+    if ( Node.is_processing ) CANquitto::primaryBuffer.push_back(buf, 12);
+    else {
+      CANquitto::secondaryBuffer.push_back(buf, 12);
+      uint8_t transfer[12];
+      uint32_t primary_available = CANquitto::primaryBuffer.size();
+      for ( uint32_t p = 0; p < primary_available; p++ ) {
+        CANquitto::primaryBuffer.pop_front(transfer, 12);
+        CANquitto::secondaryBuffer.push_back(transfer, 12);
+      }
+    }
 
   }
 }
@@ -207,15 +216,6 @@ void ext_output(const CAN_message_t &msg) {
 uint16_t ext_events() {
   uint8_t search[12]; /* buffer is recycled throughout the entire function */
 
-  /* ################## TAKE ALL DATA FROM PRIMARY BUFFER (CONSUMER ONLY) ######################## */
-  /* ################## AND PUSH IT TO SECONDARY BUFFER (CONSUMER & PRODUCER) #################### */
-  uint32_t primary_available = CANquitto::primaryBuffer.size();
-  for ( uint32_t p = 0; p < primary_available; p++ ) {
-    CANquitto::primaryBuffer.pop_front(search, 12);
-    CANquitto::secondaryBuffer.push_back(search, 12);
-  }
-
-
   /* ######### IF COMPLETED FRAME NOT FOUND, EXIT IMMEDIATELY ######### */
   search[2] = ( Node.nodeID >> 1) | ( 3 << 6 );
   if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
@@ -224,6 +224,8 @@ uint16_t ext_events() {
   /* ######### GOTO FIRST FRAME FOR VARIABLE SETTINGS, EXIT IMMEDIATELY IF ERROR ######### */
   search[2] = ( Node.nodeID >> 1) | ( 1 << 6 );
   if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
+
+  Node.is_processing = 1;
 
   uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
   uint32_t _id = 0;
@@ -290,5 +292,6 @@ uint16_t ext_events() {
     if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
   }
 
+  Node.is_processing = 0;
   return 0;
 }
