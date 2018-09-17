@@ -34,7 +34,7 @@
 
 CANquitto Node = CANquitto();
 Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE, 12> CANquitto::primaryBuffer;
-Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*8, 12> CANquitto::secondaryBuffer;
+Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*4, 12> CANquitto::secondaryBuffer;
 _CQ_ptr CANquitto::_handler = nullptr;
 
 
@@ -54,6 +54,7 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
   if ( !length || !_enabled || length > 8100) return 0;
 
   write_id_validate = dest_node;
+  write_ack_valid = 0;
 
   length += 5;
   uint8_t buffer[length];
@@ -92,7 +93,7 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
     else if ( j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
     Can0.write(_send);
-    if ( j == (buf_levels - 2) ) write_ack_valid = 0;
+    //if ( j == (buf_levels - 2) ) write_ack_valid = 0;
     delayMicroseconds(delay_send);
   }
 
@@ -287,6 +288,9 @@ uint16_t ext_events() {
       }
     }
   }
+
+          response.buf[1] = 0x06;
+          Can0.write(response);
 
   /* ######### CLEAR NODE'S FRAMES FROM QUEUE ######### */
   uint32_t _available = CANquitto::secondaryBuffer.size();
