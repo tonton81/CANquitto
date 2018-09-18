@@ -44,7 +44,7 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
     nodeID = node;
     nodeNetID = net & 0x1FFE0000;
     _enabled = 1;
-    node_process.begin(node_events,150);
+    node_process.begin(node_events,2);
     node_process.priority(64);
     return 1;
   }
