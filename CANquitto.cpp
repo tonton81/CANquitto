@@ -33,20 +33,23 @@
 #include "IFCT.h"
 
 CANquitto Node = CANquitto();
-Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE, 12> CANquitto::primaryBuffer;
-Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE*4, 12> CANquitto::secondaryBuffer;
+Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_PRIMARY, 12> CANquitto::primaryBuffer;
+Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_SECONDARY, 12> CANquitto::secondaryBuffer;
 _CQ_ptr CANquitto::_handler = nullptr;
+IntervalTimer node_process;
 
-
-
+void node_events(); /* function forwarder */
 bool CANquitto::begin(uint8_t node, uint32_t net) {
   if ( node && node < 128 && net & 0x1FFE0000 ) {
     nodeID = node;
     nodeNetID = net & 0x1FFE0000;
     _enabled = 1;
+    node_process.begin(node_events,150);
+    node_process.priority(64);
     return 1;
   }
   _enabled = 0;
+  node_process.end();
   return 0;
 }
 
@@ -93,18 +96,15 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
     else if ( j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
     Can0.write(_send);
-    //if ( j == (buf_levels - 2) ) write_ack_valid = 0;
     delayMicroseconds(delay_send);
   }
 
   uint32_t timeout = millis();
-  while ( !write_ack_valid ) {
+  while ( write_ack_valid != 0x06 ) {
     if ( millis() - timeout > wait_time ) break;
   }
 
-  if ( write_ack_valid ) return write_ack_valid;
-  write_ack_valid = 0xFF; // keep it set
-  return 0;
+  return (write_ack_valid) ? write_ack_valid : 0xFF; // keep it set on timeout
 }
 
 
@@ -180,72 +180,68 @@ void ext_output(const CAN_message_t &msg) {
                         msg.buf[3], msg.buf[4], msg.buf[5], msg.buf[6], msg.buf[7]
                       };
 
-    /* ######### IF WE GET A START FRAME, CLEAR CURRENT NODE FRAMES FROM BOTH QUEUES ######### */
-    if ( ( ( ( msg.id & 0x1C000 ) >> 14) & 0x7 ) == 1 ) {
-      uint32_t _available = CANquitto::primaryBuffer.size();
-      uint32_t masked_id = msg.id & 0x1FFE3FFF;
-      uint8_t transfer_buf[12];
-      for ( uint32_t c = 0; c < _available; c++ ) {
-        CANquitto::primaryBuffer.pop_front(transfer_buf, 12);
-        if ( masked_id != ( msg.id & 0x1FFE3FFF ) ) CANquitto::primaryBuffer.push_back(transfer_buf, 12);
-      }
-      _available = CANquitto::secondaryBuffer.size();
-      for ( uint32_t c = 0; c < _available; c++ ) {
-        CANquitto::secondaryBuffer.pop_front(transfer_buf, 12);
-        if ( masked_id != ( msg.id & 0x1FFE3FFF ) ) CANquitto::secondaryBuffer.push_back(transfer_buf, 12);
-      }
-    }
-
     /* ######### QUEUE THE FRAME ######### */
-    if ( Node.is_processing ) CANquitto::primaryBuffer.push_back(buf, 12);
+
+    if ( Node.events_is_processing ) CANquitto::primaryBuffer.push_back(buf, 12);
     else {
-      CANquitto::secondaryBuffer.push_back(buf, 12);
+      CANquitto::secondaryBuffer.push_front(buf, 12);
       uint8_t transfer[12];
       uint32_t primary_available = CANquitto::primaryBuffer.size();
       for ( uint32_t p = 0; p < primary_available; p++ ) {
         CANquitto::primaryBuffer.pop_front(transfer, 12);
-        CANquitto::secondaryBuffer.push_back(transfer, 12);
+        CANquitto::secondaryBuffer.push_front(transfer, 12);
       }
     }
+
 
   }
 }
 
 
+void node_events() {
+  Node.events();
+}
 
+uint16_t CANquitto::events() {
 
-
-uint16_t ext_events() {
   if ( !Node._enabled ) return 0;
+
   uint8_t search[12]; /* buffer is recycled throughout the entire function */
 
   /* ######### IF COMPLETED FRAME NOT FOUND, EXIT IMMEDIATELY ######### */
   search[2] = ( Node.nodeID >> 1) | ( 3 << 6 );
-  if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
+  if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) {
+    return 0;
+  }
+
   uint16_t limit = (uint16_t)( search[4] & 0xF ) | (search[5] + 1);
   uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
 
   CAN_message_t response;
-  response.ext = response.seq = 1;
+  response.ext = 1;
   response.id = Node.nodeNetID | (masked_id & 0x7F) << 7 | Node.nodeID | 4 << 14;
-
 
   /* ######### GOTO FIRST FRAME FOR VARIABLE SETTINGS, EXIT IMMEDIATELY IF ERROR ######### */
   search[2] = ( Node.nodeID >> 1) | ( 1 << 6 );
-  if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) return 0;
+  if ( !(CANquitto::secondaryBuffer.find(search, 12, 2, 2, 2)) ) {
+    response.buf[1] = 0x15;
+    Can0.write(response);
+    return 0;
+  }
 
-  Node.is_processing = 1;
 
   uint32_t _id = 0;
   uint16_t find_len = ((uint16_t)search[6] << 8 | search[7]);
   uint16_t find_crc = ((uint16_t)search[8] << 8 | search[9]);
-
+  bool crc_passed = 0;
   uint16_t memmove_shift = 0;
   uint8_t find_packetid = search[10], payload_transfer[find_len];
   memmove(&payload_transfer[memmove_shift], &search[11], (search[4] >> 4) );
   memmove_shift += (search[4] >> 4) - 5;
 
   uint16_t crc_check = 0;
+
+  Node.events_is_processing = 1;
 
   for ( uint16_t i = 1; i < limit; i++ ) {
     search[4] = (search[4] & ~(0xF)) | ((i & 0xF00) >> 8);
@@ -273,24 +269,17 @@ uint16_t ext_events() {
         for ( uint32_t i = 0; i < find_len; i++ ) crc_check ^= payload_transfer[i];
 
         if ( crc_check == find_crc ) {
+          crc_passed = 1;
           response.buf[1] = 0x06;
-          Can0.write(response);
-          AsyncCQ info;
-          info.node = (masked_id & 0x7F);
-          info.packetid = find_packetid;
-          if ( CANquitto::_handler ) CANquitto::_handler(payload_transfer, find_len, info);
         }
         else {
           response.buf[1] = 0x15;
-          Can0.write(response);
         }
+        Can0.write(response);
         break;
       }
     }
   }
-
-          response.buf[1] = 0x06;
-          Can0.write(response);
 
   /* ######### CLEAR NODE'S FRAMES FROM QUEUE ######### */
   uint32_t _available = CANquitto::secondaryBuffer.size();
@@ -299,6 +288,14 @@ uint16_t ext_events() {
     _id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
     if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
   }
-  Node.is_processing = 0;
+
+  Node.events_is_processing = 0;
+
+  if ( crc_passed ) {
+    AsyncCQ info;
+    info.node = (masked_id & 0x7F);
+    info.packetid = find_packetid;
+    if ( CANquitto::_handler ) CANquitto::_handler(payload_transfer, find_len, info);
+  }
   return 0;
 }
