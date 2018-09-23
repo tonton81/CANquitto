@@ -53,6 +53,7 @@ std::atomic<uint32_t> CANquitto::_enabled;
 CANquitto Node = CANquitto();
 Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_PRIMARY, 12> CANquitto::primaryBuffer;
 Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_SECONDARY, 12> CANquitto::secondaryBuffer;
+Circular_Buffer<uint8_t, 4, 2> CANquitto::nodeBus;
 _CQ_ptr CANquitto::_handler = nullptr;
 
 bool CANquitto::begin(uint8_t node, uint32_t net) {
@@ -66,7 +67,7 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
   return 0;
 }
 
-uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time) {
+uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time, IFCT& bus) {
   if ( !length || !_enabled || length > 8100) return 0;
 
   write_id_validate.store(dest_node);
@@ -108,7 +109,7 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
     else if ( j == ( buf_levels - 1 ) ) _send.id = nodeNetID.load() | dest_node << 7 | nodeID.load() | 3 << 14;
     else if ( j ) _send.id = nodeNetID.load() | dest_node << 7 | nodeID.load() | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
-    Can0.write(_send);
+    bus.write(_send);
     delayMicroseconds(delay_send);
   }
 
@@ -199,6 +200,8 @@ void ext_output(const CAN_message_t &msg) {
                         (uint8_t)(msg.id >> 8), (uint8_t)msg.id , msg.buf[0], msg.buf[1], msg.buf[2],
                         msg.buf[3], msg.buf[4], msg.buf[5], msg.buf[6], msg.buf[7]
                       };
+    uint8_t node[2] = { (uint8_t)(msg.id & 0x7F), msg.bus };
+    CANquitto::nodeBus.push_back(node, 2);
 
     /* ######### QUEUE THE FRAME ######### */
     if ( CANquitto::events_is_processing.load() ) CANquitto::primaryBuffer.push_back(buf, 12);
@@ -317,6 +320,11 @@ uint16_t CANquitto::events() {
     AsyncCQ info;
     info.node = (masked_id & 0x7F);
     info.packetid = find_packetid;
+    static uint8_t node_bus[2] = { 0 };
+    node_bus[0] = info.node;
+    node_bus[1] = 0xFF;
+    CANquitto::nodeBus.find(node_bus, 2, 0, 0, 0);
+    info.bus = node_bus[1];
     CANquitto::events_is_processing.store(1);
     if ( CANquitto::_handler ) CANquitto::_handler(payload_transfer, find_len, info);
     CANquitto::events_is_processing.store(0);
