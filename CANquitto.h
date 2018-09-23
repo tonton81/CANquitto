@@ -46,7 +46,7 @@
 struct AsyncCQ {
   uint8_t node = 0;
   uint8_t packetid = 0;
-  uint8_t bus = 0xFF;
+  uint8_t bus = 0;
 };
 
 typedef void (*_CQ_ptr)(const uint8_t* buffer, uint16_t length, AsyncCQ info);
