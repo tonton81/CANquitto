@@ -242,6 +242,17 @@ uint16_t CANquitto::events() {
   uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
   uint32_t _id = 0;
 
+  static uint8_t node_bus[2] = { 0 };
+  node_bus[0] = (masked_id & 0x7F);
+  node_bus[1] = 0xFF;
+  CANquitto::nodeBus.find(node_bus, 2, 0, 0, 0);
+
+  IFCT* bus;
+  if ( !node_bus[1] ) bus = &Can0;
+#if defined(__MK66FX1M0__)
+  else bus = &Can1;
+#endif
+
   CAN_message_t response;
   response.ext = 1;
   response.id = CANquitto::nodeNetID.load() | (masked_id & 0x7F) << 7 | CANquitto::nodeID.load() | 4 << 14;
@@ -257,7 +268,7 @@ uint16_t CANquitto::events() {
       if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
     }
     CANquitto::events_is_processing.store(0);
-    Can0.write(response);
+    bus->write(response);
     return 0x01;
   }
 
@@ -287,7 +298,7 @@ uint16_t CANquitto::events() {
           if ( masked_id != _id ) CANquitto::secondaryBuffer.push_back(search, 12);
         }
         CANquitto::events_is_processing.store(0);
-        Can0.write(response);
+        bus->write(response);
         return 0x15;
       }
     }
@@ -320,16 +331,12 @@ uint16_t CANquitto::events() {
     AsyncCQ info;
     info.node = (masked_id & 0x7F);
     info.packetid = find_packetid;
-    static uint8_t node_bus[2] = { 0 };
-    node_bus[0] = info.node;
-    node_bus[1] = 0xFF;
-    CANquitto::nodeBus.find(node_bus, 2, 0, 0, 0);
     info.bus = node_bus[1];
     CANquitto::events_is_processing.store(1);
     if ( CANquitto::_handler ) CANquitto::_handler(payload_transfer, find_len, info);
     CANquitto::events_is_processing.store(0);
     response.buf[1] = 0x06;
   }
-  Can0.write(response);
+  bus->write(response);
   return 0xEF;
 }
