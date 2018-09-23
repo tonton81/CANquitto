@@ -33,9 +33,15 @@
 #include "Arduino.h"
 #include "circular_buffer.h"
 #include "IFCT.h"
+#include <atomic>
 
-#define CANQUITTO_BUFFER_SIZE_PRIMARY 1024
-#define CANQUITTO_BUFFER_SIZE_SECONDARY 1024
+#if defined(__MK20DX256__) 
+#define CANQUITTO_BUFFER_SIZE_PRIMARY 256
+#define CANQUITTO_BUFFER_SIZE_SECONDARY 1024    // 4x CANQUITTO_BUFFER_SIZE_PRIMARY
+#elif defined(__MK64FX512__) || defined(__MK66FX1M0__)
+#define CANQUITTO_BUFFER_SIZE_PRIMARY 512
+#define CANQUITTO_BUFFER_SIZE_SECONDARY 8192    // 8x CANQUITTO_BUFFER_SIZE_PRIMARY
+#endif
 
 struct AsyncCQ {
   uint8_t node = 0;
@@ -47,20 +53,20 @@ typedef void (*_CQ_ptr)(const uint8_t* buffer, uint16_t length, AsyncCQ info);
 class CANquitto {
 
   public:
-    CANquitto() {;}
-    bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
-    uint8_t write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000);
-    volatile uint32_t write_ack_valid = 1;
-    volatile uint32_t write_id_validate = 0;
-    uint32_t nodeNetID = 0x8FFFFFF & 0x1FFE0000;
-    uint8_t nodeID = 1;
-    volatile uint32_t events_is_processing = 0;
+    constexpr CANquitto() {;}
+    static bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
+    static uint8_t write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000);
+    static std::atomic<uint32_t> write_ack_valid;
+    static std::atomic<uint32_t> write_id_validate;
+    static std::atomic<uint32_t> nodeNetID;
+    static std::atomic<uint32_t> nodeID;
+    static std::atomic<uint32_t> events_is_processing;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_PRIMARY, 12> primaryBuffer;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_SECONDARY, 12> secondaryBuffer;
     void onReceive(_CQ_ptr handler) { CANquitto::_handler = handler; }
     static _CQ_ptr _handler;
-    volatile bool _enabled = 1;
-    uint16_t events();
+    static std::atomic<uint32_t> _enabled;
+    static uint16_t events();
 
   private:
 
