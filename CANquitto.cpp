@@ -171,9 +171,9 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
 
 
 void ext_output(const CAN_message_t &msg) {
-  static std::atomic<uint32_t> running;
-  if ( running.load() ) return;
-  running.store(1);
+//  static std::atomic<uint32_t> running;
+//  if ( running.load() ) return;
+//  running.store(1);
 
   if ( !CANquitto::_enabled.load() ) return;
 
@@ -190,7 +190,7 @@ void ext_output(const CAN_message_t &msg) {
           break;
         }
     }
-    running.store(0);
+    //running.store(0);
     return;
   }
 
@@ -215,17 +215,17 @@ void ext_output(const CAN_message_t &msg) {
     }
 
   }
-  running.store(0);
+//  running.store(0);
 }
 
 
 uint16_t ext_events() {
-  static std::atomic<uint32_t> running;
-  if ( running.load() ) return 0;
-  running.store(1);
-  CANquitto::events();
-  running.store(0);
-  return 0;
+//  static std::atomic<uint32_t> running;
+//  if ( running.load() ) return 0;
+//  running.store(1);
+//  CANquitto::events();
+//  running.store(0);
+  return CANquitto::events();
 }
 
 
