@@ -43,6 +43,8 @@
 #define CANQUITTO_BUFFER_SIZE_SECONDARY 512
 #endif
 
+#define NODE_UPTIME_LIMIT 2500
+
 struct AsyncCQ {
   uint8_t node = 0;
   uint8_t packetid = 0;
@@ -56,7 +58,7 @@ class CANquitto {
   public:
     constexpr CANquitto() {;}
     static bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
-    static uint8_t write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000, IFCT& bus = Can0);
+    static uint8_t write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000, IFCT* bus = &Can0);
     static std::atomic<uint32_t> write_ack_valid;
     static std::atomic<uint32_t> write_id_validate;
     static std::atomic<uint32_t> nodeNetID;
@@ -64,7 +66,7 @@ class CANquitto {
     static std::atomic<uint32_t> events_is_processing;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_PRIMARY, 12> primaryBuffer;
     static Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_SECONDARY, 12> secondaryBuffer;
-    static Circular_Buffer<uint8_t, 4, 2> nodeBus;
+    static Circular_Buffer<uint32_t, 8, 3> nodeBus;
     void onReceive(_CQ_ptr handler) { CANquitto::_handler = handler; }
     static _CQ_ptr _handler;
     static std::atomic<uint32_t> _enabled;
