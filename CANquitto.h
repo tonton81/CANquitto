@@ -59,6 +59,7 @@ class CANquitto {
     constexpr CANquitto() {;}
     static bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
     static uint8_t write(const uint8_t *array, uint32_t length, uint8_t _nodeID, uint8_t packetid = 0, uint32_t delay_send = 1000, uint32_t timeout = 2000, IFCT* bus = &Can0);
+    static bool isOnline(uint8_t node);
     static std::atomic<uint32_t> write_ack_valid;
     static std::atomic<uint32_t> write_id_validate;
     static std::atomic<uint32_t> nodeNetID;
