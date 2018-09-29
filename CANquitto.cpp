@@ -67,13 +67,19 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
   return 0;
 }
 
+
+bool CANquitto::isOnline(uint8_t node) {
+  static uint32_t node_bus[3] = { 0 };
+  node_bus[0] = node;
+  return CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0);
+}
+
 uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time, IFCT* bus) {
   if ( !length || !_enabled || length > 8100 ) return 0;
 
   static uint32_t node_bus[3] = { 0 };
   node_bus[0] = dest_node;
   if ( !CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0) ) return 0;
-
 
   write_id_validate.store(dest_node);
   write_ack_valid.store(0);
