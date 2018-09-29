@@ -53,7 +53,7 @@ std::atomic<uint32_t> CANquitto::_enabled;
 CANquitto Node = CANquitto();
 Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_PRIMARY, 12> CANquitto::primaryBuffer;
 Circular_Buffer<uint8_t, CANQUITTO_BUFFER_SIZE_SECONDARY, 12> CANquitto::secondaryBuffer;
-Circular_Buffer<uint8_t, 4, 2> CANquitto::nodeBus;
+Circular_Buffer<uint32_t, 8, 3> CANquitto::nodeBus;
 _CQ_ptr CANquitto::_handler = nullptr;
 
 bool CANquitto::begin(uint8_t node, uint32_t net) {
@@ -67,8 +67,13 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
   return 0;
 }
 
-uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time, IFCT& bus) {
-  if ( !length || !_enabled || length > 8100) return 0;
+uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time, IFCT* bus) {
+  if ( !length || !_enabled || length > 8100 ) return 0;
+
+  static uint32_t node_bus[3] = { 0 };
+  node_bus[0] = dest_node;
+  if ( !CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0) ) return 0;
+
 
   write_id_validate.store(dest_node);
   write_ack_valid.store(0);
@@ -109,7 +114,7 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
     else if ( j == ( buf_levels - 1 ) ) _send.id = nodeNetID.load() | dest_node << 7 | nodeID.load() | 3 << 14;
     else if ( j ) _send.id = nodeNetID.load() | dest_node << 7 | nodeID.load() | 2 << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
-    bus.write(_send);
+    bus->write(_send);
     delayMicroseconds(delay_send);
   }
 
@@ -171,10 +176,6 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
 
 
 void ext_output(const CAN_message_t &msg) {
-//  static std::atomic<uint32_t> running;
-//  if ( running.load() ) return;
-//  running.store(1);
-
   if ( !CANquitto::_enabled.load() ) return;
 
   /* ######### REJECT UNKNOWN NODE FRAMES ######### */
@@ -190,7 +191,6 @@ void ext_output(const CAN_message_t &msg) {
           break;
         }
     }
-    //running.store(0);
     return;
   }
 
@@ -200,8 +200,6 @@ void ext_output(const CAN_message_t &msg) {
                         (uint8_t)(msg.id >> 8), (uint8_t)msg.id , msg.buf[0], msg.buf[1], msg.buf[2],
                         msg.buf[3], msg.buf[4], msg.buf[5], msg.buf[6], msg.buf[7]
                       };
-    uint8_t node[2] = { (uint8_t)(msg.id & 0x7F), msg.bus };
-    CANquitto::nodeBus.push_back(node, 2);
 
     /* ######### QUEUE THE FRAME ######### */
     if ( CANquitto::events_is_processing.load() ) CANquitto::primaryBuffer.push_back(buf, 12);
@@ -213,18 +211,38 @@ void ext_output(const CAN_message_t &msg) {
         CANquitto::secondaryBuffer.push_back(transfer, 12);
       }
     }
-
   }
-//  running.store(0);
+  else if ( !( (msg.id & 0x3F80) >> 7 ) ) { /* global msgs */
+    static uint32_t node[3] = { 0 };
+    node[0] = msg.id & 0x7F;
+    node[1] = msg.bus;
+    node[2] = millis();
+    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
+  }
+
 }
 
 
 uint16_t ext_events() {
-//  static std::atomic<uint32_t> running;
-//  if ( running.load() ) return 0;
-//  running.store(1);
-//  CANquitto::events();
-//  running.store(0);
+
+  static uint32_t notify = millis();
+  if ( millis() - notify >= 1000 ) {
+    notify = millis();
+    CAN_message_t notifier;
+    notifier.ext = 1;
+    notifier.id = ( CANquitto::nodeNetID.load() | CANquitto::nodeID.load() );
+    Can0.write(notifier);
+#if defined(__MK66FX1M0__)
+    Can1.write(notifier);
+#endif
+  }
+
+  static uint32_t search[3] = { 0 };
+  for ( uint16_t i = 0; i < CANquitto::nodeBus.size(); i++ ) {
+    CANquitto::nodeBus.peek_front(search, 3, i);
+    if ( millis() - search[2] > NODE_UPTIME_LIMIT ) CANquitto::nodeBus.findRemove(search, 3, 0, 1, 2);
+  }
+
   return CANquitto::events();
 }
 
@@ -242,10 +260,10 @@ uint16_t CANquitto::events() {
   uint32_t masked_id = (search[0] << 24 | search[1] << 16 | search[2] << 8 | search[3]) & 0x1FFE3FFF;
   uint32_t _id = 0;
 
-  static uint8_t node_bus[2] = { 0 };
-  node_bus[0] = (masked_id & 0x7F);
-  node_bus[1] = 0xFF;
-  CANquitto::nodeBus.find(node_bus, 2, 0, 0, 0);
+  static uint32_t node_bus[3] = { 0 };
+  node_bus[0] = masked_id & 0x7F;
+  node_bus[1] = 0;
+  CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0);
 
   IFCT* bus;
   if ( !node_bus[1] ) bus = &Can0;
