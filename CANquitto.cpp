@@ -50,23 +50,6 @@ volatile int CANquitto::serial_write_response = 0;
 volatile int CANquitto::digitalread_response = 0;
 volatile int CANquitto::analogread_response;
 
-/*
-CANquitto::NodeFeatures CANquitto::Serial;
-CANquitto::NodeFeatures CANquitto::Serial1;
-CANquitto::NodeFeatures CANquitto::Serial2;
-CANquitto::NodeFeatures CANquitto::Serial3;
-CANquitto::NodeFeatures CANquitto::Serial4;
-CANquitto::NodeFeatures CANquitto::Serial5;
-CANquitto::NodeFeatures CANquitto::Serial6;
-CANquitto::NodeFeatures CANquitto::Wire;
-CANquitto::NodeFeatures CANquitto::Wire1;
-CANquitto::NodeFeatures CANquitto::Wire2;
-CANquitto::NodeFeatures CANquitto::Wire3;
-CANquitto::NodeFeatures CANquitto::SPI;
-CANquitto::NodeFeatures CANquitto::SPI1;
-CANquitto::NodeFeatures CANquitto::SPI2;
-*/
-
 CANquitto::CANquitto(uint8_t nodeToControl) {
   Serial.featuredNode = nodeToControl;
   Serial.serial_access = 0x80 | 0UL;
