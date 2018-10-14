@@ -154,6 +154,20 @@ void CANquitto::digitalWrite(uint8_t pin, uint8_t state) {
   bus.write(msg);
 }
 
+void CANquitto::pinMode(uint8_t pin, uint8_t mode) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  msg.buf[0] = 1; // HARDWARE PINS
+  msg.buf[1] = 0; // GPIO
+  msg.buf[2] = 3; // PINMODE
+  msg.buf[3] = pin; // PIN
+  msg.buf[4] = mode; // MODE
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+}
+
 
 void CANquitto::toggle(uint8_t pin) {
   if ( !CANquitto::isOnline(Serial.featuredNode) ) return;
@@ -228,16 +242,13 @@ uint8_t CANquitto::sendMsg(const uint8_t *array, uint32_t length, uint8_t packet
 
 
 bool CANquitto::isOnline(uint8_t node) {
-  static uint32_t node_bus[3] = { 0 };
-  node_bus[0] = node;
+  uint32_t node_bus[3] = { node };
   return CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0);
 }
 
 
 IFCT& CANquitto::node_bus(uint8_t node) {
-  static uint32_t node_bus[3] = { 0 };
-  node_bus[0] = node;
-  node_bus[1] = 0;
+  uint32_t node_bus[3] = { node, 0 };
   bool found = CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0);
   if ( found ) {
     if ( !node_bus[1] ) return Can0;
@@ -317,6 +328,7 @@ void ext_output(const CAN_message_t &msg) {
             if ( LED_BUILTIN == msg.buf[3] ) GPIOC_PTOR = 32;
             else digitalWrite(msg.buf[3], !digitalRead(msg.buf[3]) );
           }
+          if ( msg.buf[1] == 0 && msg.buf[2] == 3 ) pinMode(msg.buf[3],msg.buf[4]);
         }
 
     }
@@ -324,11 +336,7 @@ void ext_output(const CAN_message_t &msg) {
   }
 
   if ( ( (msg.id & 0x3F80) >> 7 ) == CANquitto::nodeID ) { /* something is for this node! */
-    static uint8_t isr_buffer[12] = { 0 };
-    isr_buffer[0] = msg.id >> 24;
-    isr_buffer[1] = msg.id >> 16;
-    isr_buffer[2] = msg.id >> 8;
-    isr_buffer[3] = msg.id >> 0;
+    uint8_t isr_buffer[12] = { (uint8_t)(msg.id >> 24), (uint8_t)(msg.id >> 16), (uint8_t)(msg.id >> 8), (uint8_t)msg.id };
     memmove(&isr_buffer[0] + 4, &msg.buf[0], 8);
     CANquitto::cq_isr_buffer.push_back(isr_buffer, 12);
   }
