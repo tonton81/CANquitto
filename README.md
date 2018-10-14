@@ -1,6 +1,6 @@
 # CANquitto
 
-  CANquitto is a new canbus protocol library designed for teensy 3.x series MCUs. Currently in development stage, it has adopted quite a few features. This library takes advantage of IFCT and Circular_Buffer library when dealing with payload re-assembly.
+  CANquitto is a new canbus protocol library designed for teensy 3.x series MCUs. Currently in development stage, it has adopted quite a few features. This library takes advantage of IFCT and Circular_Buffer libraries when dealing with payload re-assembly.
   
   Forum: https://forum.pjrc.com/threads/53776-CANquitto
   
