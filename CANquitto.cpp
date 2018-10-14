@@ -48,6 +48,7 @@ bool CANquitto::enabled = 0;
 volatile int CANquitto::serial_write_count[6] = { 0 };
 volatile int CANquitto::serial_write_response = 0;
 volatile int CANquitto::digitalread_response = 0;
+volatile int CANquitto::analogread_response;
 
 
 CANquitto::NodeFeatures CANquitto::Serial;
@@ -139,6 +140,39 @@ int CANquitto::digitalRead(uint8_t pin) {
   }
   return CANquitto::digitalread_response;
 }
+
+int CANquitto::analogRead(uint8_t pin) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return -1;
+  CANquitto::analogread_response = -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  msg.buf[0] = 1; // HARDWARE PINS
+  msg.buf[1] = 0; // GPIO
+  msg.buf[2] = 4; // ANALOGREAD
+  msg.buf[3] = pin; // PIN
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+  uint32_t timeout = millis();
+  while ( CANquitto::analogread_response == -1 ) {
+    if ( millis() - timeout > 200 ) return -1;
+  }
+  return CANquitto::analogread_response;
+}
+
+void CANquitto::analogReadResolution(unsigned int bits) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  msg.buf[0] = 1; // HARDWARE PINS
+  msg.buf[1] = 0; // GPIO
+  msg.buf[2] = 5; // ANALOGREADRESOLUTION
+  msg.buf[3] = bits; // BITS
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+}
+
 
 void CANquitto::digitalWrite(uint8_t pin, uint8_t state) {
   if ( !CANquitto::isOnline(Serial.featuredNode) ) return;
@@ -276,7 +310,8 @@ void ext_output(const CAN_message_t &msg) {
       case 0: { /* RESPONSES */
           if ( msg.buf[1] == 0 ) CANquitto::write_ack_valid = msg.buf[2];
           if ( msg.buf[1] == 1 ) CANquitto::serial_write_response = msg.buf[2]; // response code for serial writing
-          if ( msg.buf[1] == 2 && msg.buf[2] == 0 ) CANquitto::digitalread_response = msg.buf[3]; 
+          if ( msg.buf[1] == 2 && msg.buf[2] == 0 ) CANquitto::digitalread_response = msg.buf[3];
+          if ( msg.buf[1] == 2 && msg.buf[2] == 1 ) CANquitto::analogread_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
           break;
         }
     }
@@ -309,28 +344,63 @@ void ext_output(const CAN_message_t &msg) {
             else Can1.write(response);
 #endif
           }
+          break;
         }
       case 1: { /* HARDWARE PINS SECTION */
-          if ( msg.buf[1] == 0 && msg.buf[2] == 0 ) digitalWriteFast(msg.buf[3], msg.buf[4]);
-          if ( msg.buf[1] == 0 && msg.buf[2] == 1 ) {
-            CAN_message_t response;
-            response.buf[1] = 2; // HARDWARE PINS RESPONSE
-            response.buf[2] = 0; // GPIO SECTION
-            response.ext = 1;
-            response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
-            response.buf[3] = digitalReadFast(msg.buf[3]);
-            if ( !msg.bus ) Can0.write(response);
+          switch ( msg.buf[1] ) { /* GPIO AREA */
+            case 0: {
+                switch ( msg.buf[2] ) {
+                  case 0: {
+                      digitalWriteFast(msg.buf[3], msg.buf[4]);
+                      break;
+                    }
+                  case 1: {
+                      CAN_message_t response;
+                      response.buf[1] = 2; // HARDWARE PINS RESPONSE
+                      response.buf[2] = 0; // DIGITALREAD
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      response.buf[3] = digitalReadFast(msg.buf[3]);
+                      if ( !msg.bus ) Can0.write(response);
 #if defined(__MK66FX1M0__)
-            else Can1.write(response);
+                      else Can1.write(response);
 #endif
-          }
-          if ( msg.buf[1] == 0 && msg.buf[2] == 2 ) {
-            if ( LED_BUILTIN == msg.buf[3] ) GPIOC_PTOR = 32;
-            else digitalWrite(msg.buf[3], !digitalRead(msg.buf[3]) );
-          }
-          if ( msg.buf[1] == 0 && msg.buf[2] == 3 ) pinMode(msg.buf[3],msg.buf[4]);
-        }
-
+                      break;
+                    }
+                  case 2: {
+                      if ( LED_BUILTIN == msg.buf[3] ) GPIOC_PTOR = 32;
+                      else digitalWrite(msg.buf[3], !digitalRead(msg.buf[3]) );
+                      break;
+                    }
+                  case 3: {
+                      pinMode(msg.buf[3], msg.buf[4]);
+                      break;
+                    }
+                  case 4: {
+                      CAN_message_t response;
+                      response.buf[1] = 2; // HARDWARE PINS RESPONSE
+                      response.buf[2] = 1; // ANALOGREAD
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      int value = analogRead(msg.buf[3]);
+                      response.buf[3] = value >> 8;
+                      response.buf[4] = value;
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 5: {
+                      analogReadResolution(msg.buf[3]);
+                      break;
+                    }
+                }
+                break;
+              } // GPIO CASE AREA
+          } // GPIO SWITCH AREA
+          break;
+        } // HARDWARE PINS SECTION
     }
     return;
   }
@@ -345,7 +415,6 @@ void ext_output(const CAN_message_t &msg) {
     if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
   }
 }
-
 
 
 uint16_t ext_events() {
