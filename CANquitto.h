@@ -26,7 +26,7 @@ class CANquitto {
     CANquitto(uint8_t nodeToControl);
     static bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
     static volatile int write_ack_valid;
-    static volatile int write_id_validate;
+    static volatile uint32_t write_id_validate;
     static volatile int serial_write_count[6];
     static volatile int serial_write_response;
     static volatile int digitalread_response;
