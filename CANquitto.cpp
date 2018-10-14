@@ -32,36 +32,152 @@
 #include <kinetis.h>
 #include "Arduino.h"
 #include "IFCT.h"
+#include <atomic>
+#include <util/atomic.h>
+#include "Stream.h"
 
-CANquitto Node = CANquitto();
-Circular_Buffer<uint32_t, CANQUITTO_BUFFER_SIZE, 4> CANquitto::payload_queue;
+Circular_Buffer<uint8_t, MAX_NODE_RECEIVING * 16, 12> CANquitto::cq_isr_buffer;
+Circular_Buffer<uint8_t, (uint32_t)pow(2, ceil(log(MAX_NODE_RECEIVING) / log(2))), MAX_PAYLOAD_SIZE> CANquitto::storage;
 Circular_Buffer<uint32_t, 8, 3> CANquitto::nodeBus;
 _CQ_ptr CANquitto::_handler = nullptr;
-uint32_t CANquitto::nodeNetID = 0x8FFFFFF & 0x1FFE0000;
-uint8_t CANquitto::nodeID = 1;
-volatile uint32_t CANquitto::write_ack_valid = 1;
-volatile uint32_t CANquitto::write_id_validate = 0;
+uint32_t CANquitto::nodeNetID;
+uint32_t CANquitto::nodeID;
+volatile int CANquitto::write_ack_valid = 1;
+volatile int CANquitto::write_id_validate = 0;
 bool CANquitto::enabled = 0;
+volatile int CANquitto::serial_write_count[6] = { 0 };
+volatile int CANquitto::serial_write_response = 0;
+volatile int CANquitto::digitalread_response = 0;
 
+
+CANquitto::NodeFeatures CANquitto::Serial;
+CANquitto::NodeFeatures CANquitto::Serial1;
+CANquitto::NodeFeatures CANquitto::Serial2;
+CANquitto::NodeFeatures CANquitto::Serial3;
+CANquitto::NodeFeatures CANquitto::Serial4;
+CANquitto::NodeFeatures CANquitto::Serial5;
+CANquitto::NodeFeatures CANquitto::Serial6;
+CANquitto::NodeFeatures CANquitto::Wire;
+CANquitto::NodeFeatures CANquitto::Wire1;
+CANquitto::NodeFeatures CANquitto::Wire2;
+CANquitto::NodeFeatures CANquitto::Wire3;
+CANquitto::NodeFeatures CANquitto::SPI;
+CANquitto::NodeFeatures CANquitto::SPI1;
+CANquitto::NodeFeatures CANquitto::SPI2;
+
+CANquitto::CANquitto(uint8_t nodeToControl) {
+  Serial.featuredNode = nodeToControl;
+  Serial.serial_access = 0x80 | 0UL;
+  Serial.port = 0;
+  Serial1.featuredNode = nodeToControl;
+  Serial1.serial_access = 0x80 | 1UL;
+  Serial1.port = 1;
+  Serial2.featuredNode = nodeToControl;
+  Serial2.serial_access = 0x80 | 2UL;
+  Serial2.port = 2;
+  Serial3.featuredNode = nodeToControl;
+  Serial3.serial_access = 0x80 | 3UL;
+  Serial3.port = 3;
+  Serial4.featuredNode = nodeToControl;
+  Serial4.serial_access = 0x80 | 4UL;
+  Serial4.port = 4;
+  Serial5.featuredNode = nodeToControl;
+  Serial5.serial_access = 0x80 | 5UL;
+  Serial5.port = 5;
+  Serial6.featuredNode = nodeToControl;
+  Serial6.serial_access = 0x80 | 6UL;
+  Serial6.port = 6;
+
+  Wire.featuredNode = nodeToControl;
+  Wire.wire_access = 0x80 | 0UL;
+  Wire.port = 0;
+  Wire1.featuredNode = nodeToControl;
+  Wire1.wire_access = 0x80 | 1UL;
+  Wire1.port = 1;
+  Wire2.featuredNode = nodeToControl;
+  Wire2.wire_access = 0x80 | 2UL;
+  Wire2.port = 2;
+  Wire3.featuredNode = nodeToControl;
+  Wire3.wire_access = 0x80 | 3UL;
+  Wire3.port = 3;
+
+  SPI.featuredNode = nodeToControl;
+  SPI.spi_access = 0x80 | 0UL;
+  SPI.port = 0;
+  SPI1.featuredNode = nodeToControl;
+  SPI1.spi_access = 0x80 | 1UL;
+  SPI1.port = 1;
+  SPI2.featuredNode = nodeToControl;
+  SPI2.spi_access = 0x80 | 2UL;
+  SPI2.port = 2;
+}
 
 bool CANquitto::begin(uint8_t node, uint32_t net) {
   if ( node && node < 128 && net & 0x1FFE0000 ) {
     nodeID = node;
-    nodeNetID = net & 0x1FFE0000;
+    nodeNetID = (net & 0x1FFE0000);
     return (enabled = 1);
   }
   return (enabled = 0);
 }
 
-uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_node, uint8_t packetid, uint32_t delay_send, uint32_t wait_time, IFCT& bus) {
-  if ( !length ) return 0;
+int CANquitto::digitalRead(uint8_t pin) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return -1;
+  CANquitto::digitalread_response = -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  msg.buf[0] = 1; // HARDWARE PINS
+  msg.buf[1] = 0; // GPIO
+  msg.buf[2] = 1; // DIGITAL READ
+  msg.buf[3] = pin; // PIN
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+  uint32_t timeout = millis();
+  while ( CANquitto::digitalread_response == -1 ) {
+    if ( millis() - timeout > 200 ) return -1;
+  }
+  return CANquitto::digitalread_response;
+}
 
-  static uint32_t node_bus[3] = { 0 };
-  node_bus[0] = dest_node;
-  if ( !CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0) ) return 0;
+void CANquitto::digitalWrite(uint8_t pin, uint8_t state) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  msg.buf[0] = 1; // HARDWARE PINS
+  msg.buf[1] = 0; // GPIO
+  msg.buf[2] = 0; // DIGITAL WRITE
+  msg.buf[3] = pin; // PIN
+  msg.buf[4] = state; // STATE
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+}
+
+
+void CANquitto::toggle(uint8_t pin) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  msg.buf[0] = 1; // HARDWARE PINS
+  msg.buf[1] = 0; // GPIO
+  msg.buf[2] = 2; // TOGGLE PIN
+  msg.buf[3] = pin; // PIN
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+}
+
+
+uint8_t CANquitto::sendMsg(const uint8_t *array, uint32_t length, uint8_t packetid, uint32_t delay_send, uint32_t wait_time) {
+  if ( !length ) return 0;
+  if ( !Serial.featuredNode || Serial.featuredNode > 127 ) return 0; // nodes are from 1 to 127 max
 
   write_ack_valid = 0;
-  write_id_validate = dest_node;
+  write_id_validate = Serial.featuredNode;
+
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return 0;
+  IFCT& bus = node_bus(Serial.featuredNode);
 
   length += 5;
   uint8_t buffer[length];
@@ -81,7 +197,7 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
   for ( uint16_t i = 0; i < buf_levels; i++ ) {
     if ( i < buf_levels - 1 ) {
       memmove(&buf[i][2], &buffer[i * 6], 6);
-      buf[i][0] = (6 << 4) | (i >> 8);
+      buf[i][0] = (6UL << 4) | (i >> 8);
       buf[i][1] = i;
       continue;
     }
@@ -95,38 +211,20 @@ uint8_t CANquitto::write(const uint8_t *array, uint32_t length, uint8_t dest_nod
   _send.ext = _send.seq = 1;
 
   for ( uint16_t j = 0; j < buf_levels; j++ ) {
-    if ( !j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 1 << 14;
-    else if ( j == ( buf_levels - 1 ) ) _send.id = nodeNetID | dest_node << 7 | nodeID | 3 << 14;
-    else if ( j ) _send.id = nodeNetID | dest_node << 7 | nodeID | 2 << 14;
+    if ( !j ) _send.id = nodeNetID | Serial.featuredNode << 7 | nodeID | 1UL << 14;
+    else if ( j == ( buf_levels - 1 ) ) _send.id = nodeNetID | Serial.featuredNode << 7 | nodeID | 3UL << 14;
+    else if ( j ) _send.id = nodeNetID | Serial.featuredNode << 7 | nodeID | 2UL << 14;
     memmove(&_send.buf[0], &buf[j][0], 8);
     bus.write(_send);
     delayMicroseconds(delay_send);
   }
 
-  bool retry_once = 1;
   uint32_t timeout = millis();
   while ( write_ack_valid != 0x06 ) {
-    if ( millis() - timeout > wait_time ) break;
-    if ( write_ack_valid == 0x15 ) {
-      if ( retry_once ) {
-        retry_once = 0;
-        timeout = millis();
-        continue;
-      }
-      break;
-    }
+    if ( millis() - timeout > wait_time || write_ack_valid == 0x15 ) break;
   }
-
   return (( write_ack_valid ) ? write_ack_valid : 0xFF);
 }
-
-
-
-
-
-
-
-
 
 
 bool CANquitto::isOnline(uint8_t node) {
@@ -136,31 +234,19 @@ bool CANquitto::isOnline(uint8_t node) {
 }
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+IFCT& CANquitto::node_bus(uint8_t node) {
+  static uint32_t node_bus[3] = { 0 };
+  node_bus[0] = node;
+  node_bus[1] = 0;
+  bool found = CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0);
+  if ( found ) {
+    if ( !node_bus[1] ) return Can0;
+#if defined(__MK66FX1M0__)
+    else return Can1;
+#endif
+  }
+  return Can0;
+}
 
 
 
@@ -172,63 +258,92 @@ bool CANquitto::isOnline(uint8_t node) {
 
 
 void ext_output(const CAN_message_t &msg) {
+  if ( ( msg.id & 0x1FFE0000 ) != ( CANquitto::nodeNetID & 0x1FFE0000 ) ) return; /* reject unknown net frames */
 
-  if ( ( msg.id & 0x1FFE0000 ) != ( Node.nodeNetID & 0x1FFE0000 ) ) return; /* reject unknown net frames */
-
-  if ( msg.id == ((CANquitto::nodeNetID & 0x1FFE0000) | CANquitto::write_id_validate | CANquitto::nodeID << 7 | 4 << 14) ) {
+  if ( msg.id == ((CANquitto::nodeNetID & 0x1FFE0000) | CANquitto::write_id_validate | CANquitto::nodeID << 7 | 4UL << 14) ) {
     switch ( msg.buf[0] ) {
-      case 0: { /* NODE TRANSFER RESPONSE ACK */
-          CANquitto::write_ack_valid = msg.buf[1];
+      case 0: { /* RESPONSES */
+          if ( msg.buf[1] == 0 ) CANquitto::write_ack_valid = msg.buf[2];
+          if ( msg.buf[1] == 1 ) CANquitto::serial_write_response = msg.buf[2]; // response code for serial writing
+          if ( msg.buf[1] == 2 && msg.buf[2] == 0 ) CANquitto::digitalread_response = msg.buf[3]; 
           break;
         }
     }
     return;
   }
 
-  if ( ( (msg.id & 0x3F80) >> 7 ) == Node.nodeID ) { /* something is for this node! */
-    static uint32_t buffer[4];
-    buffer[0] = msg.id;
-    buffer[1] = (uint32_t)(msg.buf[0] << 24) | msg.buf[1] << 16 | msg.buf[2] << 8 | msg.buf[3];
-    buffer[2] = (uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7];
-    buffer[3] = 0;
-    if ( ((msg.id & 0x1C000) >> 14) == 1 ) buffer[3] = 0x1000000 | ((uint16_t)(msg.buf[0] & 0xF) | msg.buf[1]); // start frame of payload
-    if ( ((msg.id & 0x1C000) >> 14) == 2 ) buffer[3] = 0x2000000 | ((uint16_t)(msg.buf[0] & 0xF) | msg.buf[1]); // continuation frame of payload
-    if ( ((msg.id & 0x1C000) >> 14) == 3 ) buffer[3] = 0x3000000; // last frame of payload
-    CANquitto::payload_queue.push_back(buffer,4);
-  }
-  else if ( ((msg.id & 0x3F80) >> 7) == 0 ) { /* global msgs */
-    static uint32_t node[3] = { 0 };
-    node[0] = msg.id & 0x7F;
-    node[1] = msg.bus;
-    node[2] = millis();
-    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
+  if ( msg.id == ((CANquitto::nodeNetID & 0x1FFE0000) | CANquitto::write_id_validate | CANquitto::nodeID << 7 | 5UL << 14) ) {
+    switch ( msg.buf[0] ) {
+      case 0: { /* SERIAL WRITE */
+          if ( (msg.buf[1] & 0x7) == 0 ) ::Serial.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+          else if ( (msg.buf[1] & 0x7) == 1 ) ::Serial1.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+          else if ( (msg.buf[1] & 0x7) == 2 ) ::Serial2.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+          else if ( (msg.buf[1] & 0x7) == 3 ) ::Serial3.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+          else if ( (msg.buf[1] & 0x7) == 4 ) ::Serial4.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+          else if ( (msg.buf[1] & 0x7) == 5 ) ::Serial5.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+          else if ( (msg.buf[1] & 0x7) == 6 ) ::Serial6.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+#endif
+          if ( ((msg.buf[1] & 0xC0) >> 6) == 0 ) CANquitto::serial_write_count[(msg.buf[1] & 0x7)] = ((msg.buf[1] & 0x38) >> 3);
+          else if ( ((msg.buf[1] & 0xC0) >> 6) == 1 ) CANquitto::serial_write_count[(msg.buf[1] & 0x7)] += ((msg.buf[1] & 0x38) >> 3);
+          else if ( ((msg.buf[1] & 0xC0) >> 6) == 2 ) {
+            CANquitto::serial_write_count[(msg.buf[1] & 0x7)] += ((msg.buf[1] & 0x38) >> 3);
+            CAN_message_t response;
+            response.buf[1] = response.ext = 1;
+            response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+            response.buf[2] = CANquitto::serial_write_count[(msg.buf[1] & 0x7)];
+            CANquitto::serial_write_count[(msg.buf[1] & 0x7)] = 0;
+            if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+            else Can1.write(response);
+#endif
+          }
+        }
+      case 1: { /* HARDWARE PINS SECTION */
+          if ( msg.buf[1] == 0 && msg.buf[2] == 0 ) digitalWriteFast(msg.buf[3], msg.buf[4]);
+          if ( msg.buf[1] == 0 && msg.buf[2] == 1 ) {
+            CAN_message_t response;
+            response.buf[1] = 2; // HARDWARE PINS RESPONSE
+            response.buf[2] = 0; // GPIO SECTION
+            response.ext = 1;
+            response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+            response.buf[3] = digitalReadFast(msg.buf[3]);
+            if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+            else Can1.write(response);
+#endif
+          }
+          if ( msg.buf[1] == 0 && msg.buf[2] == 2 ) {
+            if ( LED_BUILTIN == msg.buf[3] ) GPIOC_PTOR = 32;
+            else digitalWrite(msg.buf[3], !digitalRead(msg.buf[3]) );
+          }
+        }
+
+    }
+    return;
   }
 
+  if ( ( (msg.id & 0x3F80) >> 7 ) == CANquitto::nodeID ) { /* something is for this node! */
+    static uint8_t isr_buffer[12] = { 0 };
+    isr_buffer[0] = msg.id >> 24;
+    isr_buffer[1] = msg.id >> 16;
+    isr_buffer[2] = msg.id >> 8;
+    isr_buffer[3] = msg.id >> 0;
+    memmove(&isr_buffer[0] + 4, &msg.buf[0], 8);
+    CANquitto::cq_isr_buffer.push_back(isr_buffer, 12);
+  }
+  else if ( ((msg.id & 0x3F80) >> 7) == 0 ) {
+    uint32_t node[3] = { (msg.id & 0x7F), msg.bus, millis() };
+    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
+  }
 }
 
 
 
-
-
-
-
-
-
-
-
-
-
 uint16_t ext_events() {
-  static uint32_t buffer[4];
-  static uint16_t find_payload_len;
-  static uint16_t find_frame_count_max;
-  static uint16_t find_crc;
-  static uint8_t  packetID;
-
-
-  static uint32_t notify = millis();
-  if ( millis() - notify >= NODE_KEEPALIVE ) {
-    notify = millis();
+  static uint32_t notify_self = millis();
+  if ( millis() - notify_self >= NODE_KEEPALIVE ) { // broadcast self to network
+    notify_self = millis();
     static CAN_message_t notifier;
     notifier.ext = 1;
     notifier.id = ( CANquitto::nodeNetID | CANquitto::nodeID );
@@ -238,124 +353,142 @@ uint16_t ext_events() {
 #endif
   }
 
-
-  static uint32_t node_scan[3];
   for ( uint16_t i = 0; i < CANquitto::nodeBus.size(); i++ ) {
+    static uint32_t node_scan[3]; // remove expired nodes from active list
     CANquitto::nodeBus.peek_front(node_scan, 3, i);
     if ( millis() - node_scan[2] > NODE_UPTIME_LIMIT ) CANquitto::nodeBus.findRemove(node_scan, 3, 0, 1, 2);
   }
 
-
-  static CAN_message_t response;
-  response.ext = 1;
-  response.id = (CANquitto::nodeNetID | ((buffer[0] & 0x7F) << 7) | CANquitto::nodeID | (4 << 14));
-  response.buf[1] = 0x15;
-
-  buffer[3] = 0x3000000;
-  if ( CANquitto::payload_queue.find(buffer, 4, 3, 3, 3) ) find_frame_count_max = (buffer[1] >> 16) & 0xFFF;
-  else return 0;
-
-  static uint32_t node_bus[3] = { 0 };
-  node_bus[0] = buffer[0] & 0x7F;
-  node_bus[1] = 0;
-  CANquitto::nodeBus.find(node_bus, 3, 0, 0, 0);
-
-
-  static IFCT& bus = Can0;
-  if ( !node_bus[1] ) bus = Can0;
-#if defined(__MK66FX1M0__)
-  else bus = Can1;
-#endif
-
-
-  buffer[3] = 0x1000000;
-  if ( CANquitto::payload_queue.find(buffer, 4, 3, 3, 3) ) {
-    packetID = (buffer[2] >> 8) & 0xFF;
-    find_payload_len = buffer[1] & 0xFFFF;
-    find_crc = buffer[2] >> 16;
-  }
-  else {
-    CANquitto::flush_node_frames(buffer[0]);
-    bus.write(response);
-    return 0;
-  }
-
-
-  uint16_t payload_pos = 1;
-  uint16_t calc_crc = 0;
-  uint8_t payload[find_payload_len];
-
-
-  for ( uint16_t i = 0; i < find_frame_count_max; i++ ) {
-    if ( i == 0 ) {
-      buffer[3] = 0x1000000;
-      if (CANquitto::payload_queue.find(buffer, 4, 3, 3, 3)) {
-        payload[0] = buffer[2] & 0xFF;
-        continue;
+  if ( CANquitto::cq_isr_buffer.size() ) {
+    uint8_t cq_buffer[12] = { 0 };
+    CANquitto::cq_isr_buffer.pop_front(cq_buffer, 12);
+    uint32_t cq_canId = (uint32_t)(cq_buffer[0] << 24) | cq_buffer[1] << 16 | cq_buffer[2] << 8 | cq_buffer[3];
+    uint8_t buffer[MAX_PAYLOAD_SIZE] = { (uint8_t)(cq_canId & 0x7F) };
+    if ( CANquitto::storage.find(buffer, MAX_PAYLOAD_SIZE, 0, 0, 0) ) {
+      uint16_t frame_sequence = ((uint16_t)(cq_buffer[4] << 8) | cq_buffer[5]) & 0xFFF;
+      if ( frame_sequence ) {
+        memmove(&buffer[0] + 7 + ((frame_sequence - 1) * 6), &cq_buffer[0] + 6, 6);
+        if ( ((cq_canId & 0x1C000) >> 14) == 3 ) {
+          CANquitto::storage.findRemove(buffer, MAX_PAYLOAD_SIZE, 0, 0, 0);
+          AsyncCQ info;
+          info.node = buffer[0];
+          info.packetid = buffer[5];
+          uint16_t crc = 0;
+          for ( uint16_t i = 0; i < ((uint16_t)(buffer[1] << 8) | buffer[2]); i++ ) crc ^= buffer[i + 6];
+          IFCT& bus = CANquitto::node_bus(buffer[0]);
+          CAN_message_t response;
+          response.ext = 1;
+          response.id = (CANquitto::nodeNetID | (uint32_t)buffer[0] << 7 | CANquitto::nodeID | (4UL << 14));
+          response.buf[2] = 0x15;
+          if ( crc == ((uint16_t)(buffer[3] << 8) | buffer[4]) ) {
+            response.buf[2] = 0x06;
+            bus.write(response);
+            if ( CANquitto::_handler ) CANquitto::_handler(buffer + 6, ((uint16_t)(buffer[1] << 8) | buffer[2]), info);
+          }
+          else bus.write(response);
+        }
+        else CANquitto::storage.replace(buffer, MAX_PAYLOAD_SIZE, 0, 0, 0);
       }
-      else {
-        CANquitto::flush_node_frames(buffer[0]);
-        bus.write(response);
-        return 0;
-      }
-    }
-
-    buffer[3] = 0x2000000 | i;
-    if (CANquitto::payload_queue.find(buffer, 4, 3, 3, 3)) {
-      payload[payload_pos + 0] = buffer[1] >> 8;
-      payload[payload_pos + 1] = buffer[1] >> 0;
-      payload[payload_pos + 2] = buffer[2] >> 24;
-      payload[payload_pos + 3] = buffer[2] >> 16;
-      payload[payload_pos + 4] = buffer[2] >> 8;
-      payload[payload_pos + 5] = buffer[2] >> 0;
-      payload_pos += 6;
     }
     else {
-      CANquitto::flush_node_frames(buffer[0]);
-      bus.write(response);
-      return 0;
+      memmove(&buffer[0] + 1, &cq_buffer[0] + 6, 6);
+      CANquitto::storage.push_back(buffer, MAX_PAYLOAD_SIZE);
     }
   }
-  buffer[3] = 0x3000000;
-  if ( CANquitto::payload_queue.find(buffer, 4, 3, 3, 3) ) {
-      if ( (buffer[1] >> 28) >= 0 ) payload[payload_pos + 0] = buffer[1] >> 8;
-      if ( (buffer[1] >> 28) >= 1 ) payload[payload_pos + 1] = buffer[1] >> 0;
-      if ( (buffer[1] >> 28) >= 2 ) payload[payload_pos + 2] = buffer[2] >> 24;
-      if ( (buffer[1] >> 28) >= 3 ) payload[payload_pos + 3] = buffer[2] >> 16;
-      if ( (buffer[1] >> 28) >= 4 ) payload[payload_pos + 4] = buffer[2] >> 8;
-      if ( (buffer[1] >> 28) >= 5 ) payload[payload_pos + 5] = buffer[2] >> 0;
-  }
-  else {
-    CANquitto::flush_node_frames(buffer[0]);
-    bus.write(response);
-    return 0;
-  }
-
-
-  for ( uint16_t i = 0; i < find_payload_len; i++ ) calc_crc ^= payload[i];
-
-  CANquitto::flush_node_frames(buffer[0]);
-
-  if ( calc_crc == find_crc ) {
-    static AsyncCQ info;
-    info.node = buffer[0] & 0x7F;
-    info.packetid = packetID;
-    info.bus = node_bus[1];
-    if ( CANquitto::_handler ) CANquitto::_handler(payload, find_payload_len, info);
-    response.buf[1] = 0x06;
-  }
-  bus.write(response);
   return 0;
 }
 
 
-void CANquitto::flush_node_frames(uint32_t canID) {
-  static uint32_t buffer[4];
-  buffer[0] = canID;
-  buffer[0] = (buffer[0] & 0x1FFE3FFF) | 1 << 14;
-  while ( CANquitto::payload_queue.findRemove(buffer, 12, 0, 0, 0) );
-  buffer[0] = (buffer[0] & 0x1FFE3FFF) | 2 << 14;
-  while ( CANquitto::payload_queue.findRemove(buffer, 12, 0, 0, 0) );
-  buffer[0] = (buffer[0] & 0x1FFE3FFF) | 3 << 14;
-  while ( CANquitto::payload_queue.findRemove(buffer, 12, 0, 0, 0) );
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+size_t CANquitto::NodeFeatures::println(const char *p) {
+  char _text[strlen(p) + 1];
+  memmove(&_text[0],&p[0],strlen(p));
+  _text[sizeof(_text) - 1] = '\n';
+  return write((const uint8_t*)_text, sizeof(_text));
+}
+size_t CANquitto::NodeFeatures::write(const uint8_t *buf, size_t size) {
+  if ( !CANquitto::isOnline(featuredNode) ) return 0;
+  CAN_message_t msg;
+  CANquitto::serial_write_response = -1;
+  msg.ext = msg.seq = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 0; // UART TX
+    msg.buf[1] = 0x30 | port; // WRITE BIT SF (7-8), 6 DATA(3-5) DEFAULT
+    bool firstFrameComplete = 1;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    for ( uint16_t i = 0; i < size; i++ ) {
+      if ( (size - i) <= 6 ) {
+        msg.buf[1] = 0x80 | port | ((size - i) << 3);
+        for ( uint8_t k = 2; k < 8; k++ ) {
+          if ( i == size ) {
+            msg.buf[k] = 0xAA;
+            continue;
+          }
+          msg.buf[k] = buf[i++];
+        }
+        bus.write(msg);
+        break;
+      }
+      for ( uint8_t k = 2; k < 8; k++ ) msg.buf[k] = buf[i++];
+      i--;
+      bus.write(msg);
+      if ( firstFrameComplete ) {
+        firstFrameComplete = 0;
+        msg.buf[1] = 0x70 | port;
+      }
+    }
+  }
+  uint32_t timeout = millis();
+  while ( CANquitto::serial_write_response == -1 ) {
+    if ( millis() - timeout > 200 ) return 0;
+  }
+  return CANquitto::serial_write_response;
 }
