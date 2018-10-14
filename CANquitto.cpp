@@ -430,10 +430,12 @@ uint16_t ext_events() {
 #endif
   }
 
-  for ( uint16_t i = 0; i < CANquitto::nodeBus.size(); i++ ) {
-    static uint32_t node_scan[3]; // remove expired nodes from active list
-    CANquitto::nodeBus.peek_front(node_scan, 3, i);
-    if ( millis() - node_scan[2] > NODE_UPTIME_LIMIT ) CANquitto::nodeBus.findRemove(node_scan, 3, 0, 1, 2);
+  ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+    for ( uint16_t i = 0; i < CANquitto::nodeBus.size(); i++ ) {
+      static uint32_t node_scan[3]; // remove expired nodes from active list
+      CANquitto::nodeBus.peek_front(node_scan, 3, i);
+      if ( millis() - node_scan[2] > NODE_UPTIME_LIMIT ) CANquitto::nodeBus.findRemove(node_scan, 3, 0, 1, 2);
+    }
   }
 
   if ( CANquitto::cq_isr_buffer.size() ) {
