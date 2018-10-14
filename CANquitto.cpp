@@ -48,7 +48,10 @@ bool CANquitto::enabled = 0;
 volatile int CANquitto::serial_write_count[6] = { 0 };
 volatile int CANquitto::serial_write_response = 0;
 volatile int CANquitto::digitalread_response = 0;
-volatile int CANquitto::analogread_response;
+volatile int CANquitto::analogread_response = 0;
+volatile int CANquitto::available_response = 0;
+volatile int CANquitto::peek_response = 0;
+volatile int CANquitto::read_response = 0;
 
 CANquitto::CANquitto(uint8_t nodeToControl) {
   Serial.featuredNode = nodeToControl;
@@ -142,6 +145,72 @@ int CANquitto::analogRead(uint8_t pin) {
     if ( millis() - timeout > 200 ) return -1;
   }
   return CANquitto::analogread_response;
+}
+
+int CANquitto::NodeFeatures::available() {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::available_response = -1;
+  CAN_message_t msg;
+  msg.ext = msg.seq = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 0; // AVAILABLE
+    msg.buf[3] = port; // SERIAL_PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::available_response == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::available_response;
+  }
+  return -1;
+}
+
+int CANquitto::NodeFeatures::peek() {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::peek_response = -1;
+  CAN_message_t msg;
+  msg.ext = msg.seq = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 1; // PEEK
+    msg.buf[3] = port; // SERIAL_PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::peek_response == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::peek_response;
+  }
+  return -1;
+}
+
+int CANquitto::NodeFeatures::read() {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::read_response = -1;
+  CAN_message_t msg;
+  msg.ext = msg.seq = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 2; // READ
+    msg.buf[3] = port; // SERIAL_PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::read_response == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::read_response;
+  }
+  return -1;
 }
 
 void CANquitto::analogReadResolution(unsigned int bits) {
@@ -296,6 +365,9 @@ void ext_output(const CAN_message_t &msg) {
           if ( msg.buf[1] == 1 ) CANquitto::serial_write_response = msg.buf[2]; // response code for serial writing
           if ( msg.buf[1] == 2 && msg.buf[2] == 0 ) CANquitto::digitalread_response = msg.buf[3];
           if ( msg.buf[1] == 2 && msg.buf[2] == 1 ) CANquitto::analogread_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
+          if ( msg.buf[1] == 2 && msg.buf[2] == 2 ) CANquitto::available_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
+          if ( msg.buf[1] == 2 && msg.buf[2] == 3 ) CANquitto::peek_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
+          if ( msg.buf[1] == 2 && msg.buf[2] == 4 ) CANquitto::read_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
           break;
         }
     }
@@ -385,6 +457,92 @@ void ext_output(const CAN_message_t &msg) {
           } // GPIO SWITCH AREA
           break;
         } // HARDWARE PINS SECTION
+      case 2: { /* SERIAL PINS SECTION */
+
+          switch ( msg.buf[1] ) { /* SPACEHOLDER */
+            case 0: {
+                switch ( msg.buf[2] ) {
+                  case 0: { // SERIAL_AVAILABLE
+                      CAN_message_t response;
+                      response.buf[1] = 2; // HARDWARE PINS RESPONSE
+                      response.buf[2] = 2; // AVAILABLE_RESPONSE
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      int value = 0;
+                      if ( msg.buf[3] == 0 ) value = ::Serial.available();
+                      else if ( msg.buf[3] == 1 ) value = ::Serial1.available();
+                      else if ( msg.buf[3] == 2 ) value = ::Serial2.available();
+                      else if ( msg.buf[3] == 3 ) value = ::Serial3.available();
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) value = ::Serial4.available();
+                      else if ( msg.buf[3] == 5 ) value = ::Serial5.available();
+                      else if ( msg.buf[3] == 6 ) value = ::Serial6.available();
+#endif
+                      response.buf[3] = value >> 8;
+                      response.buf[4] = value;
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 1: { // PEEK_AVAILABLE
+                      CAN_message_t response;
+                      response.buf[1] = 2; // HARDWARE PINS RESPONSE
+                      response.buf[2] = 3; // PEEK_RESPONSE
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      int value = 0;
+                      if ( msg.buf[3] == 0 ) value = ::Serial.peek();
+                      else if ( msg.buf[3] == 1 ) value = ::Serial1.peek();
+                      else if ( msg.buf[3] == 2 ) value = ::Serial2.peek();
+                      else if ( msg.buf[3] == 3 ) value = ::Serial3.peek();
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) value = ::Serial4.peek();
+                      else if ( msg.buf[3] == 5 ) value = ::Serial5.peek();
+                      else if ( msg.buf[3] == 6 ) value = ::Serial6.peek();
+#endif
+                      response.buf[3] = value >> 8;
+                      response.buf[4] = value;
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 2: { // READ_AVAILABLE
+                      CAN_message_t response;
+                      response.buf[1] = 2; // HARDWARE PINS RESPONSE
+                      response.buf[2] = 4; // READ_RESPONSE
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      int value = 0;
+                      if ( msg.buf[3] == 0 ) value = ::Serial.read();
+                      else if ( msg.buf[3] == 1 ) value = ::Serial1.read();
+                      else if ( msg.buf[3] == 2 ) value = ::Serial2.read();
+                      else if ( msg.buf[3] == 3 ) value = ::Serial3.read();
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) value = ::Serial4.read();
+                      else if ( msg.buf[3] == 5 ) value = ::Serial5.read();
+                      else if ( msg.buf[3] == 6 ) value = ::Serial6.read();
+#endif
+                      response.buf[3] = value >> 8;
+                      response.buf[4] = value;
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 3: {
+                      break;
+                    }
+                }
+                break;
+              }
+          }
+          break;
+        }
     }
     return;
   }
