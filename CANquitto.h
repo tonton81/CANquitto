@@ -44,6 +44,7 @@ class CANquitto {
     static void digitalWriteFast(uint8_t pin, uint8_t state) { digitalWrite(pin, state); }
     static void digitalWrite(uint8_t pin, uint8_t state);
     static uint8_t digitalReadFast(uint8_t pin) { return digitalRead(pin); }
+    static void pinMode(uint8_t pin, uint8_t mode);
     static int digitalRead(uint8_t pin);
     static void toggle(uint8_t pin);
 
@@ -54,8 +55,6 @@ class CANquitto {
         size_t println(const char *p);
         size_t write(uint8_t val) { return write(&val, 1); }
         size_t write(const uint8_t *buf, size_t size);
-        void digitalWrite(){;}
-        void digitalRead(){;}
         void analogRead(){;}
       private:
         uint8_t featuredNode;
