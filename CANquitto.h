@@ -30,6 +30,7 @@ class CANquitto {
     static volatile int serial_write_count[6];
     static volatile int serial_write_response;
     static volatile int digitalread_response;
+    static volatile int analogread_response;
     static uint32_t nodeNetID;
     static uint32_t nodeID;
     static Circular_Buffer<uint8_t, MAX_NODE_RECEIVING * 16, 12> cq_isr_buffer;
@@ -47,6 +48,8 @@ class CANquitto {
     static void pinMode(uint8_t pin, uint8_t mode);
     static int digitalRead(uint8_t pin);
     static void toggle(uint8_t pin);
+    static int analogRead(uint8_t pin);
+    static void analogReadResolution(unsigned int bits);
 
     class NodeFeatures {
       public:
