@@ -9,8 +9,8 @@
 
 #define MAX_PAYLOAD_SIZE 200
 #define MAX_NODE_RECEIVING 2
-#define NODE_UPTIME_LIMIT 2500
-#define NODE_KEEPALIVE 1000
+#define NODE_UPTIME_LIMIT 3000
+#define NODE_KEEPALIVE 500
 
 struct AsyncCQ {
   uint8_t node = 0;
@@ -41,15 +41,15 @@ class CANquitto {
     static bool enabled;
     static bool isOnline(uint8_t node);
     static IFCT& node_bus(uint8_t node);
-    static uint8_t sendMsg(const uint8_t *array, uint32_t length, uint8_t packetid = 0, uint32_t delay_send = 0, uint32_t timeout = 3000);
-    static void digitalWriteFast(uint8_t pin, uint8_t state) { digitalWrite(pin, state); }
-    static void digitalWrite(uint8_t pin, uint8_t state);
-    static uint8_t digitalReadFast(uint8_t pin) { return digitalRead(pin); }
-    static void pinMode(uint8_t pin, uint8_t mode);
-    static int digitalRead(uint8_t pin);
-    static void toggle(uint8_t pin);
-    static int analogRead(uint8_t pin);
-    static void analogReadResolution(unsigned int bits);
+    uint8_t sendMsg(const uint8_t *array, uint32_t length, uint8_t packetid = 0, uint32_t delay_send = 0, uint32_t timeout = 3000);
+    void digitalWriteFast(uint8_t pin, uint8_t state) { digitalWrite(pin, state); }
+    void digitalWrite(uint8_t pin, uint8_t state);
+    uint8_t digitalReadFast(uint8_t pin) { return digitalRead(pin); }
+    void pinMode(uint8_t pin, uint8_t mode);
+    int digitalRead(uint8_t pin);
+    void toggle(uint8_t pin);
+    int analogRead(uint8_t pin);
+    void analogReadResolution(unsigned int bits);
 
     class NodeFeatures {
       public:
@@ -67,20 +67,20 @@ class CANquitto {
         uint8_t port; // serial/wire/spi port
         friend CANquitto;
     };
-    static NodeFeatures Serial;
-    static NodeFeatures Serial1;
-    static NodeFeatures Serial2;
-    static NodeFeatures Serial3;
-    static NodeFeatures Serial4;
-    static NodeFeatures Serial5;
-    static NodeFeatures Serial6;
-    static NodeFeatures Wire;
-    static NodeFeatures Wire1;
-    static NodeFeatures Wire2;
-    static NodeFeatures Wire3;
-    static NodeFeatures SPI;
-    static NodeFeatures SPI1;
-    static NodeFeatures SPI2;
+    NodeFeatures Serial;
+    NodeFeatures Serial1;
+    NodeFeatures Serial2;
+    NodeFeatures Serial3;
+    NodeFeatures Serial4;
+    NodeFeatures Serial5;
+    NodeFeatures Serial6;
+    NodeFeatures Wire;
+    NodeFeatures Wire1;
+    NodeFeatures Wire2;
+    NodeFeatures Wire3;
+    NodeFeatures SPI;
+    NodeFeatures SPI1;
+    NodeFeatures SPI2;
 
   private:
     CANquitto() {;}
