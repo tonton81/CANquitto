@@ -31,6 +31,9 @@ class CANquitto {
     static volatile int serial_write_response;
     static volatile int digitalread_response;
     static volatile int analogread_response;
+    static volatile int available_response;
+    static volatile int peek_response;
+    static volatile int read_response;
     static uint32_t nodeNetID;
     static uint32_t nodeID;
     static Circular_Buffer<uint8_t, MAX_NODE_RECEIVING * 16, 12> cq_isr_buffer;
@@ -51,14 +54,16 @@ class CANquitto {
     int analogRead(uint8_t pin);
     void analogReadResolution(unsigned int bits);
 
-    class NodeFeatures {
+    class NodeFeatures : public Stream {
       public:
         NodeFeatures(){;}
-        size_t print(const char *p) { return write((const uint8_t*)p, strlen(p)); }
-        size_t println(const char *p);
-        size_t write(uint8_t val) { return write(&val, 1); }
-        size_t write(const uint8_t *buf, size_t size);
-        void analogRead(){;}
+        virtual size_t print(const char *p) { return write((const uint8_t*)p, strlen(p)); }
+        virtual size_t println(const char *p);
+        virtual size_t write(uint8_t val) { return write(&val, 1); }
+        virtual size_t write(const uint8_t *buf, size_t size);
+        virtual int available();
+        virtual int peek();
+        virtual int read();
       private:
         uint8_t featuredNode;
         uint8_t serial_access;
