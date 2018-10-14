@@ -43,7 +43,7 @@ _CQ_ptr CANquitto::_handler = nullptr;
 uint32_t CANquitto::nodeNetID;
 uint32_t CANquitto::nodeID;
 volatile int CANquitto::write_ack_valid = 1;
-volatile int CANquitto::write_id_validate = 0;
+volatile uint32_t CANquitto::write_id_validate = 0;
 bool CANquitto::enabled = 0;
 volatile int CANquitto::serial_write_count[6] = { 0 };
 volatile int CANquitto::serial_write_response = 0;
@@ -274,8 +274,8 @@ uint8_t CANquitto::sendMsg(const uint8_t *array, uint32_t length, uint8_t packet
   if ( !length ) return 0;
   if ( !Serial.featuredNode || Serial.featuredNode > 127 ) return 0; // nodes are from 1 to 127 max
 
-  write_ack_valid = 0;
-  write_id_validate = Serial.featuredNode;
+  CANquitto::write_ack_valid = 0;
+  CANquitto::write_id_validate = Serial.featuredNode;
 
   if ( !CANquitto::isOnline(Serial.featuredNode) ) return 0;
   IFCT& bus = node_bus(Serial.featuredNode);
@@ -321,8 +321,9 @@ uint8_t CANquitto::sendMsg(const uint8_t *array, uint32_t length, uint8_t packet
   }
 
   uint32_t timeout = millis();
-  while ( write_ack_valid != 0x06 ) {
-    if ( millis() - timeout > wait_time || write_ack_valid == 0x15 ) break;
+  while ( CANquitto::write_ack_valid != 0x06 ) {
+    if ( millis() - timeout > wait_time ) break; 
+    if ( write_ack_valid == 0x15 ) break;
   }
   return (( write_ack_valid ) ? write_ack_valid : 0xFF);
 }
@@ -358,9 +359,24 @@ IFCT& CANquitto::node_bus(uint8_t node) {
 void ext_output(const CAN_message_t &msg) {
   if ( ( msg.id & 0x1FFE0000 ) != ( CANquitto::nodeNetID & 0x1FFE0000 ) ) return; /* reject unknown net frames */
 
-  if ( msg.id == ((CANquitto::nodeNetID & 0x1FFE0000) | CANquitto::write_id_validate | CANquitto::nodeID << 7 | 4UL << 14) ) {
+  if ( ((msg.id & 0x3F80) >> 7) == 0 ) { /* Node global messages */
+    uint32_t node[3] = { (msg.id & 0x7F), msg.bus, millis() };
+    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
+    return;
+  }
+
+  if ( ((msg.id & 0x3F80) >> 7) != CANquitto::nodeID ) return; /* ignore frames meant for other nodes from here on. */
+
+  if ( ((msg.id & 0x1C000)>> 14) < 4 ) { /* callback payload for this node! */
+    uint8_t isr_buffer[12] = { (uint8_t)(msg.id >> 24), (uint8_t)(msg.id >> 16), (uint8_t)(msg.id >> 8), (uint8_t)msg.id };
+    memmove(&isr_buffer[0] + 4, &msg.buf[0], 8);
+    CANquitto::cq_isr_buffer.push_back(isr_buffer, 12);
+    return;
+  }
+
+  if ( ((msg.id & 0x1C000)>> 14) == 4 ) { /* RESPONSES TO GIVE TO OTHER NODES */
     switch ( msg.buf[0] ) {
-      case 0: { /* RESPONSES */
+      case 0: {
           if ( msg.buf[1] == 0 ) CANquitto::write_ack_valid = msg.buf[2];
           if ( msg.buf[1] == 1 ) CANquitto::serial_write_response = msg.buf[2]; // response code for serial writing
           if ( msg.buf[1] == 2 && msg.buf[2] == 0 ) CANquitto::digitalread_response = msg.buf[3];
@@ -374,7 +390,7 @@ void ext_output(const CAN_message_t &msg) {
     return;
   }
 
-  if ( msg.id == ((CANquitto::nodeNetID & 0x1FFE0000) | CANquitto::write_id_validate | CANquitto::nodeID << 7 | 5UL << 14) ) {
+  if ( ((msg.id & 0x1C000)>> 14) == 5 ) { /* COMMANDS GIVEN FROM OTHER NODES TO OPERATE HERE */
     switch ( msg.buf[0] ) {
       case 0: { /* SERIAL WRITE */
           if ( (msg.buf[1] & 0x7) == 0 ) ::Serial.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
@@ -547,15 +563,6 @@ void ext_output(const CAN_message_t &msg) {
     return;
   }
 
-  if ( ( (msg.id & 0x3F80) >> 7 ) == CANquitto::nodeID ) { /* something is for this node! */
-    uint8_t isr_buffer[12] = { (uint8_t)(msg.id >> 24), (uint8_t)(msg.id >> 16), (uint8_t)(msg.id >> 8), (uint8_t)msg.id };
-    memmove(&isr_buffer[0] + 4, &msg.buf[0], 8);
-    CANquitto::cq_isr_buffer.push_back(isr_buffer, 12);
-  }
-  else if ( ((msg.id & 0x3F80) >> 7) == 0 ) {
-    uint32_t node[3] = { (msg.id & 0x7F), msg.bus, millis() };
-    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
-  }
 }
 
 
@@ -709,7 +716,7 @@ size_t CANquitto::NodeFeatures::write(const uint8_t *buf, size_t size) {
   }
   uint32_t timeout = millis();
   while ( CANquitto::serial_write_response == -1 ) {
-    if ( millis() - timeout > 200 ) return 0;
+    if ( millis() - timeout > 100 ) return 0;
   }
   return CANquitto::serial_write_response;
 }
