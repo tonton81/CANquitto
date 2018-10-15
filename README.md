@@ -4,7 +4,11 @@
   
   Forum: https://forum.pjrc.com/threads/53776-CANquitto
   
-   * Multi-master design: nodes can control each other, and 2 or more nodes can control a single node.
-   * Payload transfers: You can send payloads to other nodes which they'll receive in their callback.
-   * GPIO controls, currently can read/write/toggle pins.
-   * Serial/UART controls, currently can write/print/println to any UART or USBSerial of other nodes.
+
+* Multi-master design: nodes can control each other, and 2 or more nodes can control a single node.
+
+* Payload transfers: You can send payloads to other nodes which they'll receive in their callback.
+
+* GPIO controls, read/write/toggle/pinmode,analogread pins on any nodes
+
+* Serial/UART controls, full UART/USBSerial functionality combined with Stream class.
