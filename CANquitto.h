@@ -34,6 +34,8 @@ class CANquitto {
     static volatile int available_response;
     static volatile int peek_response;
     static volatile int read_response;
+    static volatile int readbuf_response_flag;
+    static volatile uint8_t readbuf_response[6];
     static uint32_t nodeNetID;
     static uint32_t nodeID;
     static Circular_Buffer<uint8_t, MAX_NODE_RECEIVING * 16, 12> cq_isr_buffer;
@@ -64,6 +66,12 @@ class CANquitto {
         virtual int available();
         virtual int peek();
         virtual int read();
+        virtual size_t read(uint8_t* buf, size_t size);
+        virtual void flush() {;}
+        virtual void begin(uint32_t baud);
+        virtual void setRX(uint8_t pin);
+        virtual void setTX(uint8_t pin, bool opendrain=false);
+
       private:
         uint8_t featuredNode;
         uint8_t serial_access;
