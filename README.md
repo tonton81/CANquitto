@@ -11,4 +11,4 @@
 
 * GPIO controls, read/write/toggle/pinmode,analogread pins on any nodes
 
-* Serial/UART controls, full UART/USBSerial functionality combined with Stream class.
+* Serial/UART controls, full UART/USBSerial functionality combined with Stream class, allows pass-by-reference
