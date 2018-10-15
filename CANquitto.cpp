@@ -52,6 +52,8 @@ volatile int CANquitto::analogread_response = 0;
 volatile int CANquitto::available_response = 0;
 volatile int CANquitto::peek_response = 0;
 volatile int CANquitto::read_response = 0;
+volatile int CANquitto::readbuf_response_flag = 0;
+volatile uint8_t CANquitto::readbuf_response[6] = { 0 };
 
 CANquitto::CANquitto(uint8_t nodeToControl) {
   Serial.featuredNode = nodeToControl;
@@ -191,6 +193,44 @@ int CANquitto::NodeFeatures::peek() {
   return -1;
 }
 
+size_t CANquitto::NodeFeatures::read(uint8_t* buf, size_t size) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::readbuf_response_flag = -1;
+  CAN_message_t msg;
+  msg.ext = msg.seq = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 3; // read(buffer,length)
+    msg.buf[3] = port; // SERIAL_PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    uint16_t count = 0;
+    for ( uint16_t i = 0; i < size; ) {
+      CANquitto::readbuf_response_flag = -1;
+      if ( (size-1-i) < 5 ) {
+        msg.buf[4] = size-i;
+        i = size;
+      }
+      else {
+        msg.buf[4] = 5;
+      }
+      bus.write(msg);
+      uint32_t timeout = millis();
+      while ( CANquitto::readbuf_response_flag == -1 ) {
+        if ( millis() - timeout > 200 ) break; // EXIT ON ERROR!!!!
+      }
+      for ( uint16_t k = 0; k < CANquitto::readbuf_response[0]; k++ ) {
+        buf[count+k] = CANquitto::readbuf_response[1+k];
+      }
+      count += readbuf_response[0];
+      i+=5;
+    }
+    return count;
+  }
+  return 0;
+}
+
 int CANquitto::NodeFeatures::read() {
   if ( !CANquitto::isOnline(featuredNode) ) return -1;
   CANquitto::read_response = -1;
@@ -211,6 +251,58 @@ int CANquitto::NodeFeatures::read() {
     return CANquitto::read_response;
   }
   return -1;
+}
+
+void CANquitto::NodeFeatures::begin(uint32_t baud) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 4; // BEGIN
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = ((uint8_t)(baud >> 24)); // BAUDRATE
+    msg.buf[5] = ((uint8_t)(baud >> 16)); // BAUDRATE
+    msg.buf[6] = ((uint8_t)(baud >> 8)); // BAUDRATE
+    msg.buf[7] = ((uint8_t)(baud)); // BAUDRATE
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::setRX(uint8_t pin) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 5; // setRX
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pin; // PIN
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::setTX(uint8_t pin, bool opendrain) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( serial_access ) {
+    msg.buf[0] = 2; // SERIAL PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 6; // setRX
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pin; // PIN
+    msg.buf[5] = opendrain; // OPTION
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
 }
 
 void CANquitto::analogReadResolution(unsigned int bits) {
@@ -367,14 +459,14 @@ void ext_output(const CAN_message_t &msg) {
 
   if ( ((msg.id & 0x3F80) >> 7) != CANquitto::nodeID ) return; /* ignore frames meant for other nodes from here on. */
 
-  if ( ((msg.id & 0x1C000)>> 14) < 4 ) { /* callback payload for this node! */
+  if ( ((msg.id & 0x1C000) >> 14) < 4 ) { /* callback payload for this node! */
     uint8_t isr_buffer[12] = { (uint8_t)(msg.id >> 24), (uint8_t)(msg.id >> 16), (uint8_t)(msg.id >> 8), (uint8_t)msg.id };
     memmove(&isr_buffer[0] + 4, &msg.buf[0], 8);
     CANquitto::cq_isr_buffer.push_back(isr_buffer, 12);
     return;
   }
 
-  if ( ((msg.id & 0x1C000)>> 14) == 4 ) { /* RESPONSES TO GIVE TO OTHER NODES */
+  if ( ((msg.id & 0x1C000) >> 14) == 4 ) { /* RESPONSES TO GIVE TO OTHER NODES */
     switch ( msg.buf[0] ) {
       case 0: {
           if ( msg.buf[1] == 0 ) CANquitto::write_ack_valid = msg.buf[2];
@@ -384,13 +476,18 @@ void ext_output(const CAN_message_t &msg) {
           if ( msg.buf[1] == 2 && msg.buf[2] == 2 ) CANquitto::available_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
           if ( msg.buf[1] == 2 && msg.buf[2] == 3 ) CANquitto::peek_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
           if ( msg.buf[1] == 2 && msg.buf[2] == 4 ) CANquitto::read_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
+          if ( msg.buf[1] == 3 ) {
+            CANquitto::readbuf_response_flag = 1;
+            CANquitto::readbuf_response[0] = msg.buf[2];
+            for ( uint8_t i = 1; i < 6; i++ ) CANquitto::readbuf_response[i] = msg.buf[i+2];
+          }
           break;
         }
     }
     return;
   }
 
-  if ( ((msg.id & 0x1C000)>> 14) == 5 ) { /* COMMANDS GIVEN FROM OTHER NODES TO OPERATE HERE */
+  if ( ((msg.id & 0x1C000) >> 14) == 5 ) { /* COMMANDS GIVEN FROM OTHER NODES TO OPERATE HERE */
     switch ( msg.buf[0] ) {
       case 0: { /* SERIAL WRITE */
           if ( (msg.buf[1] & 0x7) == 0 ) ::Serial.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
@@ -474,7 +571,6 @@ void ext_output(const CAN_message_t &msg) {
           break;
         } // HARDWARE PINS SECTION
       case 2: { /* SERIAL PINS SECTION */
-
           switch ( msg.buf[1] ) { /* SPACEHOLDER */
             case 0: {
                 switch ( msg.buf[2] ) {
@@ -551,6 +647,71 @@ void ext_output(const CAN_message_t &msg) {
                       break;
                     }
                   case 3: {
+                      CAN_message_t response;
+                      response.buf[1] = 3; // SERIAL BUFFER READING
+                      Stream* port = &::Serial;
+                      if ( msg.buf[3] == 0 ) port = &::Serial;
+                      else if ( msg.buf[3] == 1 ) port = &::Serial1;
+                      else if ( msg.buf[3] == 2 ) port = &::Serial2;
+                      else if ( msg.buf[3] == 3 ) port = &::Serial3;
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) port = &::Serial4;
+                      else if ( msg.buf[3] == 5 ) port = &::Serial5;
+                      else if ( msg.buf[3] == 6 ) port = &::Serial6;
+#endif
+                      uint16_t count = port->available();
+                      ( count > 5 ) ? response.buf[2] = 5 : response.buf[2] = count;
+                      if ( port->available() >= msg.buf[4] ) for ( uint8_t i = 0; i < msg.buf[4]; i++ ) response.buf[i+3] = port->read();
+                      else for ( uint8_t i = 0; i < count; i++ ) response.buf[i+3] = port->read();
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 4: {
+                      if ( msg.buf[3] == 0 ) ::Serial.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+                      else if ( msg.buf[3] == 1 ) ::Serial1.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+                      else if ( msg.buf[3] == 2 ) ::Serial2.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+                      else if ( msg.buf[3] == 3 ) ::Serial3.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) ::Serial4.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+                      else if ( msg.buf[3] == 5 ) ::Serial5.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+                      else if ( msg.buf[3] == 6 ) ::Serial6.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+#endif
+                      break;
+                    }
+                  case 5: {
+                      if ( msg.buf[3] == 1 ) ::Serial1.setRX(msg.buf[4]);
+                      else if ( msg.buf[3] == 2 ) ::Serial2.setRX(msg.buf[4]);
+                      else if ( msg.buf[3] == 3 ) ::Serial3.setRX(msg.buf[4]);
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) ::Serial4.setRX(msg.buf[4]);
+                      else if ( msg.buf[3] == 5 ) ::Serial5.setRX(msg.buf[4]);
+                      else if ( msg.buf[3] == 6 ) ::Serial6.setRX(msg.buf[4]);
+#endif
+                      break;
+                    }
+                  case 6: {
+                      if ( msg.buf[3] == 1 ) ::Serial1.setTX(msg.buf[4], msg.buf[5]);
+                      else if ( msg.buf[3] == 2 ) ::Serial2.setTX(msg.buf[4], msg.buf[5]);
+                      else if ( msg.buf[3] == 3 ) ::Serial3.setTX(msg.buf[4], msg.buf[5]);
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+                      else if ( msg.buf[3] == 4 ) ::Serial4.setTX(msg.buf[4], msg.buf[5]);
+                      else if ( msg.buf[3] == 5 ) ::Serial5.setTX(msg.buf[4], msg.buf[5]);
+                      else if ( msg.buf[3] == 6 ) ::Serial6.setTX(msg.buf[4], msg.buf[5]);
+#endif
+                      break;
+                    }
+                  case 7: {
+                      break;
+                    }
+                  case 8: {
+                      break;
+                    }
+                  case 9: {
                       break;
                     }
                 }
@@ -559,11 +720,18 @@ void ext_output(const CAN_message_t &msg) {
           }
           break;
         }
+      case 3: { /* UNUSED */
+          break;
+        }
+      case 4: { /* UNUSED */
+          break;
+        }
     }
     return;
   }
 
 }
+
 
 
 uint16_t ext_events() {
