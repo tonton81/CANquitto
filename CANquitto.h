@@ -27,14 +27,16 @@ class CANquitto {
     static bool begin(uint8_t node, uint32_t net = 0x8FFFFFF & 0x1FFE0000);
     static volatile int write_ack_valid;
     static volatile uint32_t write_id_validate;
-    static volatile int serial_write_count[6];
+    static volatile int serial_write_count[7];
     static volatile int serial_write_response;
+    static volatile int wire_write_count[4];
     static volatile int digitalread_response;
     static volatile int analogread_response;
     static volatile int available_response;
     static volatile int peek_response;
     static volatile int read_response;
     static volatile int readbuf_response_flag;
+    static volatile int wire_response_flag;
     static volatile uint8_t readbuf_response[6];
     static uint32_t nodeNetID;
     static uint32_t nodeID;
@@ -62,15 +64,30 @@ class CANquitto {
         virtual size_t print(const char *p) { return write((const uint8_t*)p, strlen(p)); }
         virtual size_t println(const char *p);
         virtual size_t write(uint8_t val) { return write(&val, 1); }
+        virtual size_t write(const char *buf, size_t size) { return write((uint8_t*)buf,size); }
         virtual size_t write(const uint8_t *buf, size_t size);
         virtual int available();
         virtual int peek();
         virtual int read();
         virtual size_t read(uint8_t* buf, size_t size);
         virtual void flush() {;}
-        virtual void begin(uint32_t baud);
-        virtual void setRX(uint8_t pin);
-        virtual void setTX(uint8_t pin, bool opendrain=false);
+        void begin(uint8_t address);
+        void begin(int address);
+        void begin();
+        void begin(uint32_t baud);
+        void beginTransmission(uint8_t address);
+        void beginTransmission(int address);
+        uint8_t endTransmission(void);
+        uint8_t endTransmission(uint8_t sendStop);
+        uint8_t requestFrom(uint8_t address, uint8_t quantity, uint8_t sendStop);
+        uint8_t requestFrom(uint8_t address, uint8_t quantity);
+        uint8_t requestFrom(int address, int quantity);
+        uint8_t requestFrom(int address, int quantity, int sendStop);
+        void setClock(uint32_t clock);
+        void setSDA(uint8_t pin);
+        void setSCL(uint8_t pin);
+        void setRX(uint8_t pin);
+        void setTX(uint8_t pin, bool opendrain=false);
 
       private:
         uint8_t featuredNode;
