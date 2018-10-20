@@ -35,13 +35,12 @@
 #include <atomic>
 #include <util/atomic.h>
 #include "Stream.h"
-#include <i2c_t3.h>
-//#include <Wire.h>
 
 Circular_Buffer<uint8_t, MAX_NODE_RECEIVING * 16, 12> CANquitto::cq_isr_buffer;
 Circular_Buffer<uint8_t, (uint32_t)pow(2, ceil(log(MAX_NODE_RECEIVING) / log(2))), MAX_PAYLOAD_SIZE> CANquitto::storage;
 Circular_Buffer<uint32_t, 8, 3> CANquitto::nodeBus;
 _CQ_ptr CANquitto::_handler = nullptr;
+_CQ_detectptr CANquitto::detect_handler = nullptr;
 uint32_t CANquitto::nodeNetID;
 uint32_t CANquitto::nodeID;
 volatile int CANquitto::write_ack_valid = 1;
@@ -57,6 +56,7 @@ volatile int CANquitto::peek_response = 0;
 volatile int CANquitto::read_response = 0;
 volatile int CANquitto::readbuf_response_flag = 0;
 volatile int CANquitto::wire_response_flag = 0;
+volatile int CANquitto::spi_response_flag = 0;
 volatile uint8_t CANquitto::readbuf_response[6] = { 0 };
 
 CANquitto::CANquitto(uint8_t nodeToControl) {
@@ -110,6 +110,10 @@ bool CANquitto::begin(uint8_t node, uint32_t net) {
   if ( node && node < 128 && net & 0x1FFE0000 ) {
     nodeID = node;
     nodeNetID = (net & 0x1FFE0000);
+    ::SPI.setMOSI(11);
+    ::SPI.setMISO(12);
+    ::SPI.setSCK(14);
+    ::SPI.setCS(15);
     return (enabled = 1);
   }
   return (enabled = 0);
@@ -299,7 +303,7 @@ int CANquitto::NodeFeatures::read() {
   return -1;
 }
 
-void CANquitto::NodeFeatures::begin(uint32_t baud) {
+void CANquitto::NodeFeatures::begin(int baud) {
   if ( !CANquitto::isOnline(featuredNode) ) return;
   CAN_message_t msg;
   msg.ext = 1;
@@ -308,6 +312,18 @@ void CANquitto::NodeFeatures::begin(uint32_t baud) {
     msg.buf[0] = 2; // SERIAL PINS
     msg.buf[1] = 0; // SPACEHOLDER
     msg.buf[2] = 4; // BEGIN
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = ((uint8_t)(baud >> 24)); // BAUDRATE
+    msg.buf[5] = ((uint8_t)(baud >> 16)); // BAUDRATE
+    msg.buf[6] = ((uint8_t)(baud >> 8)); // BAUDRATE
+    msg.buf[7] = ((uint8_t)(baud)); // BAUDRATE
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE PINS
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 1; // BEGIN(BAUD)
     msg.buf[3] = port; // PORT
     msg.buf[4] = ((uint8_t)(baud >> 24)); // BAUDRATE
     msg.buf[5] = ((uint8_t)(baud >> 16)); // BAUDRATE
@@ -331,30 +347,16 @@ void CANquitto::NodeFeatures::begin() {
     IFCT& bus = CANquitto::node_bus(featuredNode);
     bus.write(msg);
   }
-}
-
-
-
-void CANquitto::NodeFeatures::begin(uint8_t address) {
-  if ( !CANquitto::isOnline(featuredNode) ) return;
-  CAN_message_t msg;
-  msg.ext = 1;
-  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
-  if ( wire_access ) {
-    msg.buf[0] = 3; // WIRE
+  if ( spi_access ) {
+    msg.buf[0] = 5; // WIRE
     msg.buf[1] = 0; // SPACEHOLDER
-    msg.buf[2] = 1; // BEGIN(address)
+    msg.buf[2] = 8; // 
     msg.buf[3] = port; // PORT
-    msg.buf[4] = address; // ADDRESS
     IFCT& bus = CANquitto::node_bus(featuredNode);
     bus.write(msg);
   }
 }
 
-void CANquitto::NodeFeatures::begin(int address) {
-  if ( !CANquitto::isOnline(featuredNode) ) return;
-  if ( wire_access ) begin((uint8_t)address);
-}
 
 void CANquitto::NodeFeatures::setRX(uint8_t pin) {
   if ( !CANquitto::isOnline(featuredNode) ) return;
@@ -372,12 +374,34 @@ void CANquitto::NodeFeatures::setRX(uint8_t pin) {
   }
 }
 
+int CANquitto::NodeFeatures::getClock(void) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 18; // GETCLOCK
+    msg.buf[3] = port; // PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return -1;
+}
+
 void CANquitto::NodeFeatures::setClock(uint32_t clock) {
   if ( !CANquitto::isOnline(featuredNode) ) return;
   CAN_message_t msg;
   msg.ext = 1;
   msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
-  if ( serial_access ) {
+  if ( wire_access ) {
     msg.buf[0] = 3; // WIRE
     msg.buf[1] = 0; // SPACEHOLDER
     msg.buf[2] = 4; // SETCLOCK
@@ -386,6 +410,40 @@ void CANquitto::NodeFeatures::setClock(uint32_t clock) {
     msg.buf[5] = ((uint8_t)(clock >> 16)); // CLOCK
     msg.buf[6] = ((uint8_t)(clock >> 8)); // CLOCK
     msg.buf[7] = ((uint8_t)(clock )); // CLOCK
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::setDefaultTimeout(uint32_t timeout) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 19; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = ((uint8_t)(timeout >> 24)); // 
+    msg.buf[5] = ((uint8_t)(timeout >> 16)); // 
+    msg.buf[6] = ((uint8_t)(timeout >> 8)); // 
+    msg.buf[7] = ((uint8_t)(timeout)); // 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::resetBus() {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 20; // 
+    msg.buf[3] = port; // PORT
     IFCT& bus = CANquitto::node_bus(featuredNode);
     bus.write(msg);
   }
@@ -407,19 +465,302 @@ void CANquitto::NodeFeatures::beginTransmission(uint8_t address) {
   }
 }
 
-uint8_t CANquitto::NodeFeatures::endTransmission(void) {
-  if ( !CANquitto::isOnline(featuredNode) ) return 0;
-  if ( wire_access ) return endTransmission(true);
-  return 0;
-}
-
-uint8_t CANquitto::NodeFeatures::endTransmission(uint8_t sendStop) {
-  if ( !CANquitto::isOnline(featuredNode) ) return -1;
-  CANquitto::wire_response_flag = -1;
+void CANquitto::NodeFeatures::sendTransmission(i2c_stop sendStop) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
   CAN_message_t msg;
   msg.ext = 1;
   msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
   if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 22; // 
+    msg.buf[3] = port; // 
+    msg.buf[4] = sendStop; // 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::sendRequest(uint8_t addr, size_t len, i2c_stop sendStop) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 23; // 
+    msg.buf[3] = port; // 
+    msg.buf[4] = addr; // 
+    msg.buf[5] = len >> 8; // 
+    msg.buf[6] = len; // 
+    msg.buf[7] = sendStop; // 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+uint8_t CANquitto::NodeFeatures::getError(void) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 24; // 
+    msg.buf[3] = port; // PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return -1;
+}
+
+uint8_t CANquitto::NodeFeatures::done(void) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 25; // 
+    msg.buf[3] = port; // PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return -1;
+}
+uint8_t CANquitto::NodeFeatures::finish(uint32_t timeout) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 26; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = ((uint8_t)(timeout >> 24)); // 
+    msg.buf[5] = ((uint8_t)(timeout >> 16)); // 
+    msg.buf[6] = ((uint8_t)(timeout >> 8)); // 
+    msg.buf[7] = ((uint8_t)(timeout)); // 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t _timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - _timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return -1;
+}
+
+uint8_t CANquitto::NodeFeatures::getRxAddr(void) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 27; // 
+    msg.buf[3] = port; // PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return -1;
+}
+
+uint8_t CANquitto::NodeFeatures::transfer(uint8_t data) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 0; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = data; 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::spi_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::spi_response_flag;
+  }
+  return -1;
+}
+
+uint16_t CANquitto::NodeFeatures::transfer16(uint16_t data) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 1; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = data >> 8; 
+    msg.buf[5] = data; 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::spi_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::spi_response_flag;
+  }
+  return -1;
+}
+
+void CANquitto::NodeFeatures::endTransaction(void) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 2; // 
+    msg.buf[3] = port; // PORT
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::beginTransaction(uint32_t speed, uint8_t msb, uint8_t mode) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 3; // 
+    msg.buf[3] = (msb << 7) | (mode << 6) | port; // PORT
+    msg.buf[4] = ((uint8_t)(speed >> 24)); // 
+    msg.buf[5] = ((uint8_t)(speed >> 16)); // 
+    msg.buf[6] = ((uint8_t)(speed >> 8)); // 
+    msg.buf[7] = ((uint8_t)(speed )); // 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::setMOSI(uint8_t pin) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 4; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pin;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::setMISO(uint8_t pin) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 5; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pin;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+void CANquitto::NodeFeatures::setSCK(uint8_t pin) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 6; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pin;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+  }
+}
+
+uint8_t CANquitto::NodeFeatures::setCS(uint8_t pin) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( spi_access ) {
+    CANquitto::spi_response_flag = -1;
+    msg.buf[0] = 5; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 7; // 
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pin; 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::spi_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::spi_response_flag;
+  }
+  return -1;
+}
+
+uint8_t CANquitto::NodeFeatures::endTransmission(void) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  if ( wire_access ) return endTransmission(true);
+  return -1;
+}
+
+uint8_t CANquitto::NodeFeatures::endTransmission(uint8_t sendStop) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
     msg.buf[0] = 3; // WIRE
     msg.buf[1] = 0; // SPACEHOLDER
     msg.buf[2] = 6; // ENDTRANSMISSION(sendStop)
@@ -433,8 +774,206 @@ uint8_t CANquitto::NodeFeatures::endTransmission(uint8_t sendStop) {
     }
     return CANquitto::wire_response_flag;
   }
+  return -1;
+}
+
+uint8_t CANquitto::NodeFeatures::endTransmission(i2c_stop sendStop, uint32_t timeout) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    CANquitto::wire_response_flag = -1;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // 
+    msg.buf[2] = 21;
+    msg.buf[3] = (sendStop << 7) | port;
+    msg.buf[4] = ((uint8_t)(timeout >> 24)); // 
+    msg.buf[5] = ((uint8_t)(timeout >> 16)); // 
+    msg.buf[6] = ((uint8_t)(timeout >> 8)); // 
+    msg.buf[7] = ((uint8_t)(timeout)); // 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t _timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - _timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return -1;
+}
+
+void CANquitto::NodeFeatures::begin(i2c_mode mode, uint8_t address1, i2c_pins pins, i2c_pullup pullup, uint32_t rate, i2c_op_mode opMode) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // BEGIN(i2c_t3...)
+    msg.buf[2] = 14;
+    msg.buf[3] = port;
+    msg.buf[4] = address1;
+    msg.buf[5] = 0; // unused
+    msg.buf[6] = mode;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    pinConfigure((i2c_pins)pins, (i2c_pullup)pullup);
+    setClock(rate);
+    setOpMode((i2c_op_mode) opMode);
+  }
+}
+
+
+
+void CANquitto::NodeFeatures::begin(i2c_mode mode, uint8_t address1, uint8_t pinSCL, uint8_t pinSDA, i2c_pullup pullup, uint32_t rate, i2c_op_mode opMode) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // BEGIN(i2c_t3...)
+    msg.buf[2] = 16;
+    msg.buf[3] = port;
+    msg.buf[4] = address1;
+    msg.buf[5] = 0; // unused
+    msg.buf[6] = mode;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    pinConfigure(pinSCL, pinSDA, (i2c_pullup)pullup);
+    setClock(rate);
+    setOpMode((i2c_op_mode) opMode);
+  }
+}
+
+void CANquitto::NodeFeatures::begin(i2c_mode mode, uint8_t address1, uint8_t address2, uint8_t pinSCL, uint8_t pinSDA, i2c_pullup pullup, uint32_t rate, i2c_op_mode opMode) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // BEGIN(i2c_t3...)
+    msg.buf[2] = 17;
+    msg.buf[3] = port;
+    msg.buf[4] = address1;
+    msg.buf[5] = address2;
+    msg.buf[6] = mode;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    pinConfigure(pinSCL, pinSDA, (i2c_pullup)pullup);
+    setClock(rate);
+    setOpMode((i2c_op_mode) opMode);
+  }
+}
+
+void CANquitto::NodeFeatures::begin(i2c_mode mode, uint8_t address1, uint8_t address2, i2c_pins pins, i2c_pullup pullup, uint32_t rate, i2c_op_mode opMode) {
+  if ( !CANquitto::isOnline(featuredNode) ) return;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // BEGIN(i2c_t3...)
+    msg.buf[2] = 15;
+    msg.buf[3] = port;
+    msg.buf[4] = address1;
+    msg.buf[5] = address2;
+    msg.buf[6] = mode;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    pinConfigure((i2c_pins)pins, (i2c_pullup)pullup);
+    setClock(rate);
+    setOpMode((i2c_op_mode) opMode);
+  }
+}
+
+
+uint8_t CANquitto::NodeFeatures::pinConfigure(i2c_pins pins, i2c_pullup pullup) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::wire_response_flag = -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    uint8_t value = 0;
+    if ( (uint8_t)pins == (uint8_t)I2C_PINS_3_4 ) value = 0;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_7_8 ) value = 1;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_16_17 ) value = 2;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_18_19 ) value = 3;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_29_30 ) value = 4;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_26_31 ) value = 5;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_33_34 ) value = 6;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_37_38 ) value = 7;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_47_48 ) value = 8;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_56_57 ) value = 9;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_DEFAULT ) value = 10;
+    else if ( (uint8_t)pins == (uint8_t)I2C_PINS_COUNT ) value = 11;
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 12; // I2C_T3 PINCONFIGURE (ENUM)
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = value;
+    msg.buf[5] = pullup;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
   return 0;
 }
+uint8_t CANquitto::NodeFeatures::pinConfigure(uint8_t pinSCL, uint8_t pinSDA, i2c_pullup pullup) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::wire_response_flag = -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 11; // I2C_T3 PINCONFIGURE (BYTES)
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = pinSCL; 
+    msg.buf[5] = pinSDA; 
+    msg.buf[6] = pullup; 
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return 0;
+}
+
+uint8_t CANquitto::NodeFeatures::setOpMode(i2c_op_mode opMode) {
+  if ( !CANquitto::isOnline(featuredNode) ) return -1;
+  CANquitto::wire_response_flag = -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  if ( wire_access ) {
+    msg.buf[0] = 3; // WIRE
+    msg.buf[1] = 0; // SPACEHOLDER
+    msg.buf[2] = 13; // I2C_T3 SETOPMODE
+    msg.buf[3] = port; // PORT
+    msg.buf[4] = opMode;
+    IFCT& bus = CANquitto::node_bus(featuredNode);
+    bus.write(msg);
+    uint32_t timeout = millis();
+    while ( CANquitto::wire_response_flag == -1 ) {
+      if ( millis() - timeout > 200 ) return -1;
+    }
+    return CANquitto::wire_response_flag;
+  }
+  return 0;
+}
+
 
 uint8_t CANquitto::NodeFeatures::requestFrom(uint8_t address, uint8_t quantity, uint8_t sendStop) {
   if ( !CANquitto::isOnline(featuredNode) ) return -1;
@@ -668,28 +1207,104 @@ IFCT& CANquitto::node_bus(uint8_t node) {
 }
 
 
-
-
+#if defined(I2C_T3_H) || defined(TwoWire_h)
 #if defined(I2C_T3_H)
 i2c_t3* get_wire_pointer(uint8_t value) {
   i2c_t3* port = &::Wire;
-#elif defined (TwoWire_h)
+#elif defined(TwoWire_h)
 TwoWire* get_wire_pointer(uint8_t value) {
   TwoWire* port = &::Wire;
 #endif
-  if ( value == 1 ) port = &::Wire1;
+  if ( value == 0 ) {
+    if ( !(SIM_SCGC4 & SIM_SCGC4_I2C0) ) port->begin();
+    return port;
+  }
+  if ( value == 1 ) {
+    port = &::Wire1;
+    if ( !(SIM_SCGC4 & SIM_SCGC4_I2C1) ) port->begin();
+  }
 #if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-  else if ( value == 2 ) port = &::Wire2;
+  else if ( value == 2 ) {
+    port = &::Wire2;
+    if ( !(SIM_SCGC1 & SIM_SCGC1_I2C2) ) port->begin();
+  }
 #endif
-#if defined(__MK66FX1M0__)
- // else if ( value == 3 ) port = &::Wire3;
+#if defined(__MK66FX1M0__) && defined(WIRE_IMPLEMENT_WIRE3)
+  else if ( value == 3 ) {
+    port = &::Wire3;
+    if ( !(SIM_SCGC1 & SIM_SCGC1_I2C3) ) port->begin();
+  }
 #endif
   return port;
 }
+#endif
+
+HardwareSerial* get_serial_pointer(uint8_t value) {
+  usb_serial_class* usbport = &::Serial;
+  HardwareSerial* uart = &::Serial1;
+  if ( value == 0 ) {
+    if ( !(SIM_SCGC4 & SIM_SCGC4_USBOTG) ) uart->begin(115200);
+    return (HardwareSerial*)usbport;
+  }
+  else if ( value == 1 ) {
+    if ( !(SIM_SCGC4 & SIM_SCGC4_UART0) ) uart->begin(115200);
+    return uart;
+  }
+  else if ( value == 2 ) {
+    uart = &::Serial2;
+    if ( !(SIM_SCGC4 & SIM_SCGC4_UART1) ) uart->begin(115200);
+  }
+  else if ( value == 3 ) {
+    uart = &::Serial3;
+    if ( !(SIM_SCGC4 & SIM_SCGC4_UART2) ) uart->begin(115200);
+  }
+#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
+  else if ( value == 4 ) {
+    uart = &::Serial4;
+    if ( !(SIM_SCGC4 & SIM_SCGC4_UART3) ) uart->begin(115200);
+  }
+  else if ( value == 5 ) {
+    uart = &::Serial5;
+    if ( !(SIM_SCGC1 & SIM_SCGC1_UART4) ) uart->begin(115200);
+  }
+#ifdef HAS_KINETISK_UART5
+  else if ( value == 6 ) {
+    uart = &::Serial6;
+    if ( !(SIM_SCGC1 & SIM_SCGC1_UART5) ) uart->begin(115200);
+  }
+#endif
+#ifdef HAS_KINETISK_LPUART0
+  else if ( value == 6 ) {
+    uart = &::Serial6;
+    if ( !(SIM_SCGC2 & SIM_SCGC2_LPUART0) ) uart->begin(115200);
+  }
+#endif
 
 
 
 
+#endif
+  return uart;
+}
+
+SPIClass* get_spi_pointer(uint8_t value) {
+  SPIClass* port = &::SPI;
+  if ( value == 0 ) {
+    if ( !(SIM_SCGC6 & SIM_SCGC6_SPI0) ) port->begin();
+    return port;
+  }
+#if !defined(__MK20DX256__)
+  else if ( value == 1 ) {
+    port = &::SPI1;
+    if ( !(SIM_SCGC6 & SIM_SCGC6_SPI1) ) port->begin();
+  }
+  else if ( value == 2 ) {
+    port = &::SPI2;
+    if ( !(SIM_SCGC3 & SIM_SCGC3_SPI2) ) port->begin();
+  }
+#endif
+  return port;
+}
 
 
 void ext_output(const CAN_message_t &msg) {
@@ -697,7 +1312,14 @@ void ext_output(const CAN_message_t &msg) {
 
   if ( ((msg.id & 0x3F80) >> 7) == 0 ) { /* Node global messages */
     uint32_t node[3] = { (msg.id & 0x7F), msg.bus, millis() };
-    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) CANquitto::nodeBus.push_back(node, 3);
+    if (!(CANquitto::nodeBus.replace(node, 3, 0, 0, 0)) ) {
+      AsyncCQ info;
+      info.node = (msg.id & 0x7F);
+      info.bus = msg.bus;
+      info.state = NODE_DETECT;
+      if ( CANquitto::detect_handler ) CANquitto::detect_handler(info);
+      CANquitto::nodeBus.push_back(node, 3);
+    }
     return;
   }
 
@@ -721,6 +1343,9 @@ void ext_output(const CAN_message_t &msg) {
           if ( msg.buf[1] == 2 && msg.buf[2] == 3 ) CANquitto::peek_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
           if ( msg.buf[1] == 2 && msg.buf[2] == 4 ) CANquitto::read_response = ((int)(msg.buf[3] << 8) | msg.buf[4]);
           if ( msg.buf[1] == 2 && msg.buf[2] == 5 ) CANquitto::wire_response_flag = msg.buf[3];
+          if ( msg.buf[1] == 2 && msg.buf[2] == 6 ) CANquitto::wire_response_flag = (int)(msg.buf[3] << 24) | msg.buf[4] << 16 | msg.buf[5] << 8 | msg.buf[6];
+          if ( msg.buf[1] == 2 && msg.buf[2] == 7 ) CANquitto::spi_response_flag = msg.buf[3];
+          if ( msg.buf[1] == 2 && msg.buf[2] == 8 ) CANquitto::spi_response_flag = (uint16_t)(msg.buf[3] << 8) | msg.buf[4];
           if ( msg.buf[1] == 3 ) {
             CANquitto::readbuf_response_flag = 1;
             CANquitto::readbuf_response[0] = msg.buf[2];
@@ -736,15 +1361,8 @@ void ext_output(const CAN_message_t &msg) {
   if ( ((msg.id & 0x1C000) >> 14) == 5 ) { /* COMMANDS GIVEN FROM OTHER NODES TO OPERATE HERE */
     switch ( msg.buf[0] ) {
       case 0: { /* SERIAL WRITE */
-          if ( (msg.buf[1] & 0x7) == 0 ) ::Serial.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-          else if ( (msg.buf[1] & 0x7) == 1 ) ::Serial1.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-          else if ( (msg.buf[1] & 0x7) == 2 ) ::Serial2.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-          else if ( (msg.buf[1] & 0x7) == 3 ) ::Serial3.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-          else if ( (msg.buf[1] & 0x7) == 4 ) ::Serial4.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-          else if ( (msg.buf[1] & 0x7) == 5 ) ::Serial5.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-          else if ( (msg.buf[1] & 0x7) == 6 ) ::Serial6.write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
-#endif
+          HardwareSerial* port = get_serial_pointer(msg.buf[1] & 0x7);
+          port->write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
           if ( ((msg.buf[1] & 0xC0) >> 6) == 0 ) CANquitto::serial_write_count[(msg.buf[1] & 0x7)] = ((msg.buf[1] & 0x38) >> 3);
           else if ( ((msg.buf[1] & 0xC0) >> 6) == 1 ) CANquitto::serial_write_count[(msg.buf[1] & 0x7)] += ((msg.buf[1] & 0x38) >> 3);
           else if ( ((msg.buf[1] & 0xC0) >> 6) == 2 ) {
@@ -826,16 +1444,8 @@ void ext_output(const CAN_message_t &msg) {
                       response.buf[2] = 2; // AVAILABLE_RESPONSE
                       response.ext = 1;
                       response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
-                      int value = 0;
-                      if ( msg.buf[3] == 0 ) value = ::Serial.available();
-                      else if ( msg.buf[3] == 1 ) value = ::Serial1.available();
-                      else if ( msg.buf[3] == 2 ) value = ::Serial2.available();
-                      else if ( msg.buf[3] == 3 ) value = ::Serial3.available();
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) value = ::Serial4.available();
-                      else if ( msg.buf[3] == 5 ) value = ::Serial5.available();
-                      else if ( msg.buf[3] == 6 ) value = ::Serial6.available();
-#endif
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
+                      int value = port->available();
                       response.buf[3] = value >> 8;
                       response.buf[4] = value;
                       if ( !msg.bus ) Can0.write(response);
@@ -850,16 +1460,8 @@ void ext_output(const CAN_message_t &msg) {
                       response.buf[2] = 3; // PEEK_RESPONSE
                       response.ext = 1;
                       response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
-                      int value = 0;
-                      if ( msg.buf[3] == 0 ) value = ::Serial.peek();
-                      else if ( msg.buf[3] == 1 ) value = ::Serial1.peek();
-                      else if ( msg.buf[3] == 2 ) value = ::Serial2.peek();
-                      else if ( msg.buf[3] == 3 ) value = ::Serial3.peek();
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) value = ::Serial4.peek();
-                      else if ( msg.buf[3] == 5 ) value = ::Serial5.peek();
-                      else if ( msg.buf[3] == 6 ) value = ::Serial6.peek();
-#endif
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
+                      int value = port->peek();
                       response.buf[3] = value >> 8;
                       response.buf[4] = value;
                       if ( !msg.bus ) Can0.write(response);
@@ -874,16 +1476,8 @@ void ext_output(const CAN_message_t &msg) {
                       response.buf[2] = 4; // READ_RESPONSE
                       response.ext = 1;
                       response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
-                      int value = 0;
-                      if ( msg.buf[3] == 0 ) value = ::Serial.read();
-                      else if ( msg.buf[3] == 1 ) value = ::Serial1.read();
-                      else if ( msg.buf[3] == 2 ) value = ::Serial2.read();
-                      else if ( msg.buf[3] == 3 ) value = ::Serial3.read();
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) value = ::Serial4.read();
-                      else if ( msg.buf[3] == 5 ) value = ::Serial5.read();
-                      else if ( msg.buf[3] == 6 ) value = ::Serial6.read();
-#endif
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
+                      int value = port->read();
                       response.buf[3] = value >> 8;
                       response.buf[4] = value;
                       if ( !msg.bus ) Can0.write(response);
@@ -895,16 +1489,7 @@ void ext_output(const CAN_message_t &msg) {
                   case 3: {
                       CAN_message_t response;
                       response.buf[1] = 3; // SERIAL BUFFER READING
-                      Stream* port = &::Serial;
-                      if ( msg.buf[3] == 0 ) port = &::Serial;
-                      else if ( msg.buf[3] == 1 ) port = &::Serial1;
-                      else if ( msg.buf[3] == 2 ) port = &::Serial2;
-                      else if ( msg.buf[3] == 3 ) port = &::Serial3;
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) port = &::Serial4;
-                      else if ( msg.buf[3] == 5 ) port = &::Serial5;
-                      else if ( msg.buf[3] == 6 ) port = &::Serial6;
-#endif
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
                       uint16_t count = port->available();
                       ( count > 5 ) ? response.buf[2] = 5 : response.buf[2] = count;
                       if ( port->available() >= msg.buf[4] ) for ( uint8_t i = 0; i < msg.buf[4]; i++ ) response.buf[i + 3] = port->read();
@@ -917,38 +1502,19 @@ void ext_output(const CAN_message_t &msg) {
 #endif
                       break;
                     }
-                  case 4: {
-                      if ( msg.buf[3] == 0 ) ::Serial.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-                      else if ( msg.buf[3] == 1 ) ::Serial1.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-                      else if ( msg.buf[3] == 2 ) ::Serial2.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-                      else if ( msg.buf[3] == 3 ) ::Serial3.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) ::Serial4.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-                      else if ( msg.buf[3] == 5 ) ::Serial5.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-                      else if ( msg.buf[3] == 6 ) ::Serial6.begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
-#endif
+                  case 4: { // BEGIN
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
+                      port->begin((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
                       break;
                     }
-                  case 5: {
-                      if ( msg.buf[3] == 1 ) ::Serial1.setRX(msg.buf[4]);
-                      else if ( msg.buf[3] == 2 ) ::Serial2.setRX(msg.buf[4]);
-                      else if ( msg.buf[3] == 3 ) ::Serial3.setRX(msg.buf[4]);
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) ::Serial4.setRX(msg.buf[4]);
-                      else if ( msg.buf[3] == 5 ) ::Serial5.setRX(msg.buf[4]);
-                      else if ( msg.buf[3] == 6 ) ::Serial6.setRX(msg.buf[4]);
-#endif
+                  case 5: { // SETRX
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
+                      port->setRX(msg.buf[4]);
                       break;
                     }
-                  case 6: {
-                      if ( msg.buf[3] == 1 ) ::Serial1.setTX(msg.buf[4], msg.buf[5]);
-                      else if ( msg.buf[3] == 2 ) ::Serial2.setTX(msg.buf[4], msg.buf[5]);
-                      else if ( msg.buf[3] == 3 ) ::Serial3.setTX(msg.buf[4], msg.buf[5]);
-#if defined(__MK64FX512__) || defined(__MK66FX1M0__)
-                      else if ( msg.buf[3] == 4 ) ::Serial4.setTX(msg.buf[4], msg.buf[5]);
-                      else if ( msg.buf[3] == 5 ) ::Serial5.setTX(msg.buf[4], msg.buf[5]);
-                      else if ( msg.buf[3] == 6 ) ::Serial6.setTX(msg.buf[4], msg.buf[5]);
-#endif
+                  case 6: {  // SETTX
+                      HardwareSerial* port = get_serial_pointer(msg.buf[3]);
+                      port->setTX(msg.buf[4], msg.buf[5]);
                       break;
                     }
                   case 7: {
@@ -973,81 +1539,97 @@ void ext_output(const CAN_message_t &msg) {
                   case 0: { // WIRE_BEGIN
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->begin();
 #elif defined (TwoWire_h)
                       TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       port->begin();
+#endif
                       break;
                     }
                   case 1: { // WIRE_BEGIN(slave)
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->begin((int)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
 #elif defined (TwoWire_h)
                       TwoWire* port = get_wire_pointer(msg.buf[3]);
+                      port->begin();
+                      port->setClock((int)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
 #endif
-                      port->begin(msg.buf[4]);
                       break;
                     }
                   case 2: { // SETSDA
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->setSDA(msg.buf[4]);
 #elif defined (TwoWire_h)
                       TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       port->setSDA(msg.buf[4]);
+#endif
                       break;
                     }
                   case 3: { // SETSCL
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->setSCL(msg.buf[4]);
 #elif defined (TwoWire_h)
                       TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       port->setSCL(msg.buf[4]);
+#endif
                       break;
                     }
                   case 4: { // SETCLOCK
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->setClock((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
 #elif defined (TwoWire_h)
                       TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       port->setClock((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+#endif
                       break;
                     }
                   case 5: { // BEGINTRANSMISSION
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->beginTransmission(msg.buf[4]);
 #elif defined (TwoWire_h)
                       TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       port->beginTransmission(msg.buf[4]);
+#endif
                       break;
                     }
                   case 6: { // ENDTRANSMISSION(SENDSTOP)
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
-#elif defined (TwoWire_h)
-                      TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       CAN_message_t response;
                       response.buf[1] = 2; // WIRE RESPONSE
                       response.buf[2] = 5;
                       response.ext = 1;
                       response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
                       response.buf[3] = port->endTransmission(msg.buf[4]);
+
                       if ( !msg.bus ) Can0.write(response);
 #if defined(__MK66FX1M0__)
                       else Can1.write(response);
+#endif
+#elif defined (TwoWire_h)
+                      TwoWire* port = get_wire_pointer(msg.buf[3]);
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      response.buf[3] = port->endTransmission(msg.buf[4]);
+
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
 #endif
                       break;
                     }
                   case 7: { // REQUESTFROM
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
-#elif defined (TwoWire_h)
-                      TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       CAN_message_t response;
                       response.buf[1] = 2; // WIRE RESPONSE
                       response.buf[2] = 5;
@@ -1058,14 +1640,24 @@ void ext_output(const CAN_message_t &msg) {
 #if defined(__MK66FX1M0__)
                       else Can1.write(response);
 #endif
+#elif defined (TwoWire_h)
+                      TwoWire* port = get_wire_pointer(msg.buf[3]);
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      response.buf[3] = port->requestFrom(msg.buf[4], msg.buf[5], msg.buf[6]);
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+#endif
                       break;
                     }
                   case 8: { // WIRE_READ
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
-#elif defined (TwoWire_h)
-                      TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       CAN_message_t response;
                       response.buf[1] = 2; // WIRE RESPONSE
                       response.buf[2] = 5;
@@ -1076,14 +1668,24 @@ void ext_output(const CAN_message_t &msg) {
 #if defined(__MK66FX1M0__)
                       else Can1.write(response);
 #endif
+#elif defined (TwoWire_h)
+                      TwoWire* port = get_wire_pointer(msg.buf[3]);
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      response.buf[3] = port->read();
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+#endif
                       break;
                     }
                   case 9: { // WIRE_PEEK
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
-#elif defined (TwoWire_h)
-                      TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       CAN_message_t response;
                       response.buf[1] = 2; // WIRE RESPONSE
                       response.buf[2] = 5;
@@ -1094,14 +1696,24 @@ void ext_output(const CAN_message_t &msg) {
 #if defined(__MK66FX1M0__)
                       else Can1.write(response);
 #endif
+#elif defined (TwoWire_h)
+                      TwoWire* port = get_wire_pointer(msg.buf[3]);
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      response.buf[3] = port->peek();
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+#endif
                       break;
                     }
                   case 10: { // WIRE_AVAILABLE
 #if defined(I2C_T3_H)
                       i2c_t3* port = get_wire_pointer(msg.buf[3]);
-#elif defined (TwoWire_h)
-                      TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
                       CAN_message_t response;
                       response.buf[1] = 2; // WIRE RESPONSE
                       response.buf[2] = 5;
@@ -1112,29 +1724,303 @@ void ext_output(const CAN_message_t &msg) {
 #if defined(__MK66FX1M0__)
                       else Can1.write(response);
 #endif
+#elif defined (TwoWire_h)
+                      TwoWire* port = get_wire_pointer(msg.buf[3]);
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      response.buf[3] = port->available();
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+#endif
                       break;
                     }
-                  case 11: { //
+                  case 11: { // PINCONFIGURE PIN (BYTES)
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      response.buf[3] = port->pinConfigure(msg.buf[4], msg.buf[5], (i2c_pullup)msg.buf[6]);
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
                       break;
                     }
-                  case 12: { //
+                  case 12: { // PINCONFIGURE PIN (ENUM)
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+#if !defined(__MK20DX256__)
+                      if ( msg.buf[4] == 0 ) response.buf[3] = port->pinConfigure(I2C_PINS_3_4, (i2c_pullup)msg.buf[5]);
+                      if ( msg.buf[4] == 1 ) response.buf[3] = port->pinConfigure(I2C_PINS_7_8, (i2c_pullup)msg.buf[5]);
+#endif
+                      if ( msg.buf[4] == 2 ) response.buf[3] = port->pinConfigure(I2C_PINS_16_17, (i2c_pullup)msg.buf[5]);
+                      if ( msg.buf[4] == 3 ) response.buf[3] = port->pinConfigure(I2C_PINS_18_19, (i2c_pullup)msg.buf[5]);
+#if defined(__MK20DX256__)
+                      if ( msg.buf[4] == 4 ) response.buf[3] = port->pinConfigure(I2C_PINS_29_30, (i2c_pullup)msg.buf[5]);
+                      if ( msg.buf[4] == 5 ) response.buf[3] = port->pinConfigure(I2C_PINS_26_31, (i2c_pullup)msg.buf[5]);
+#endif
+#if !defined(__MK20DX256__)
+                      if ( msg.buf[4] == 6 ) response.buf[3] = port->pinConfigure(I2C_PINS_33_34, (i2c_pullup)msg.buf[5]);
+                      if ( msg.buf[4] == 7 ) response.buf[3] = port->pinConfigure(I2C_PINS_37_38, (i2c_pullup)msg.buf[5]);
+                      if ( msg.buf[4] == 8 ) response.buf[3] = port->pinConfigure(I2C_PINS_47_48, (i2c_pullup)msg.buf[5]);
+#endif
+#if defined(__MK66FX1M0__)
+                      if ( msg.buf[4] == 9 ) response.buf[3] = port->pinConfigure(I2C_PINS_56_57, (i2c_pullup)msg.buf[5]);
+#endif
+                      if ( msg.buf[4] == 10 ) response.buf[3] = port->pinConfigure(I2C_PINS_DEFAULT, (i2c_pullup)msg.buf[5]);
+                      if ( msg.buf[4] == 11 ) response.buf[3] = port->pinConfigure(I2C_PINS_COUNT, (i2c_pullup)msg.buf[5]);
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
                       break;
                     }
-                  case 13: { //
+                  case 13: { // I2C_T3 SETOPMODE
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      response.buf[3] = port->setOpMode((i2c_op_mode)msg.buf[4]);
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 14: { // I2C_T3 BEGIN (1 address, ENUM)
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->begin((i2c_mode)msg.buf[6], msg.buf[4]);
+#endif
+                      break;
+                    }
+                  case 15: { // I2C_T3 BEGIN (2 address, ENUM)
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->begin((i2c_mode)msg.buf[6], msg.buf[4], msg.buf[5]);
+#endif
+                      break;
+                    }
+                  case 16: { // I2C_T3 BEGIN (1 address, SDA/SCL)
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->begin((i2c_mode)msg.buf[6], msg.buf[4]);
+#endif
+                      break;
+                    }
+                  case 17: { // I2C_T3 BEGIN (2 address, SDA/SCL)
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->begin((i2c_mode)msg.buf[6], msg.buf[4], msg.buf[5]);
+#endif
+                      break;
+                    }
+                  case 18: { // GETCLOCK
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 6;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      uint32_t baud = port->getClock();
+                      response.buf[3] = ((uint8_t)(baud >> 24)); // BAUDRATE
+                      response.buf[4] = ((uint8_t)(baud >> 16)); // BAUDRATE
+                      response.buf[5] = ((uint8_t)(baud >> 8)); // BAUDRATE
+                      response.buf[6] = ((uint8_t)(baud)); // BAUDRATE
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 19: { //setDefaultTimeout
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->setDefaultTimeout((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+#endif
+                      break;
+                    }
+                  case 20: { //
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->resetBus();
+#endif
+                      break;
+                    }
+                  case 21: { //
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer( msg.buf[3] & 0x7 );
+                      response.buf[3] = port->endTransmission((i2c_stop)((msg.buf[3] & 0x80) >> 7), (uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 22: { //
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->sendTransmission((i2c_stop)msg.buf[4]);
+#endif
+                      break;
+                    }
+                  case 23: { //
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      port->sendRequest(msg.buf[4], ((uint16_t)(msg.buf[5] << 8) | msg.buf[6]), (i2c_stop)msg.buf[7]);
+#endif
+                      break;
+                    }
+                  case 24: { //
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer( msg.buf[3] & 0x7 );
+                      response.buf[3] = port->getError();
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 25: { // DONE
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer( msg.buf[3] & 0x7 );
+                      response.buf[3] = port->done();
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 26: { //
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 6;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
+                      response.buf[3] = port->finish((uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7]);
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 27: { // getRxAddr(void)
+                      CAN_message_t response;
+                      response.buf[1] = 2; // WIRE RESPONSE
+                      response.buf[2] = 5;
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+#if defined(I2C_T3_H)
+                      i2c_t3* port = get_wire_pointer( msg.buf[3] & 0x7 );
+                      response.buf[3] = port->getRxAddr();
+#else
+                      response.buf[3] = -1;
+#endif
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 28: { //
+                      break;
+                    }
+                  case 29: { //
+                      break;
+                    }
+                  case 30: { //
+                      break;
+                    }
+                  case 31: { //
+                      break;
+                    }
+                  case 32: { //
+                      break;
+                    }
+                  case 33: { //
+                      break;
+                    }
+                  case 34: { //
+                      break;
+                    }
+                  case 35: { //
                       break;
                     }
                 }
                 break;
               }
+            case 1: {
+                break;
+              }
+            case 2: {
+                break;
+              }
+
+
           }
           break;
         }
       case 4: { /* WIRE WRITE */
 #if defined(I2C_T3_H)
-                      i2c_t3* port = get_wire_pointer(msg.buf[3]);
-#elif defined (TwoWire_h)
-                      TwoWire* port = get_wire_pointer(msg.buf[3]);
-#endif
+          i2c_t3* port = get_wire_pointer(msg.buf[1] & 0x7);
           port->write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
           if ( ((msg.buf[1] & 0xC0) >> 6) == 0 ) CANquitto::wire_write_count[(msg.buf[1] & 0x7)] = ((msg.buf[1] & 0x38) >> 3);
           else if ( ((msg.buf[1] & 0xC0) >> 6) == 1 ) CANquitto::wire_write_count[(msg.buf[1] & 0x7)] += ((msg.buf[1] & 0x38) >> 3);
@@ -1150,11 +2036,137 @@ void ext_output(const CAN_message_t &msg) {
             else Can1.write(response);
 #endif
           }
+#elif defined (TwoWire_h)
+          TwoWire* port = get_wire_pointer(msg.buf[1] & 0x7);
+          port->write(msg.buf + 2, ((msg.buf[1] & 0x38) >> 3));
+          if ( ((msg.buf[1] & 0xC0) >> 6) == 0 ) CANquitto::wire_write_count[(msg.buf[1] & 0x7)] = ((msg.buf[1] & 0x38) >> 3);
+          else if ( ((msg.buf[1] & 0xC0) >> 6) == 1 ) CANquitto::wire_write_count[(msg.buf[1] & 0x7)] += ((msg.buf[1] & 0x38) >> 3);
+          else if ( ((msg.buf[1] & 0xC0) >> 6) == 2 ) {
+            CANquitto::wire_write_count[(msg.buf[1] & 0x7)] += ((msg.buf[1] & 0x38) >> 3);
+            CAN_message_t response;
+            response.buf[1] = response.ext = 1;
+            response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+            response.buf[2] = CANquitto::wire_write_count[(msg.buf[1] & 0x7)];
+            CANquitto::wire_write_count[(msg.buf[1] & 0x7)] = 0;
+            if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+            else Can1.write(response);
+#endif
+          }
+#endif
           break;
         }
-      case 5: { /* UNUSED */
+      case 5: { /* SPI */
+          switch ( msg.buf[1] ) { /* SPACEHOLDER */
+            case 0: {
+                switch ( msg.buf[2] ) {
+                  case 0: {
+                      CAN_message_t response;
+                      response.buf[1] = 2; // 
+                      response.buf[2] = 7; // 
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      response.buf[3] = port->transfer(msg.buf[4]);
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 1: {
+                      CAN_message_t response;
+                      response.buf[1] = 2; // 
+                      response.buf[2] = 8; // 
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      uint16_t value = port->transfer16(((uint16_t)(msg.buf[4] << 8) | msg.buf[5]));
+                      response.buf[3] = value >> 8;
+                      response.buf[4] = value;
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 2: {
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      port->endTransaction();
+                      break;
+                    }
+                  case 3: {
+                      uint32_t speed = (uint32_t)(msg.buf[4] << 24) | msg.buf[5] << 16 | msg.buf[6] << 8 | msg.buf[7];
+                      uint8_t msb = (msg.buf[3] & 0x80) >> 7;
+                      uint8_t mode = (msg.buf[3] & 0x40) >> 7;
+                      SPIClass* port = get_spi_pointer(msg.buf[3] & 0x7);
+                      port->beginTransaction(SPISettings(speed, msb, mode));
+                      break;
+                    }
+                  case 4: {
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      port->setMOSI(msg.buf[4]);
+                      break;
+                    }
+                  case 5: {
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      port->setMISO(msg.buf[4]);
+                      break;
+                    }
+                  case 6: {
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      port->setSCK(msg.buf[4]);
+                      break;
+                    }
+                  case 7: {
+                      CAN_message_t response;
+                      response.buf[1] = 2; // 
+                      response.buf[2] = 7; // 
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      response.buf[3] = port->setCS(msg.buf[4]);
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 8: {
+                      SPIClass* port = get_spi_pointer(msg.buf[3]);
+                      port->begin();
+                      break;
+                    }
+                  case 9: {
+                      break;
+                    }
+                  case 10: {
+                      break;
+                    }
+                  case 11: {
+                      break;
+                    }
+                }
+                break;
+              }
+          }
           break;
         }
+      case 6: { /* UNUSED */
+          switch ( msg.buf[1] ) { /* SPACEHOLDER */
+            case 0: {
+                switch ( msg.buf[2] ) {
+                  case 0: {
+                      break;
+                    }
+                }
+                break;
+              }
+          }
+          break;
+        }
+
+
     }
     return;
   }
@@ -1163,9 +2175,8 @@ void ext_output(const CAN_message_t &msg) {
 
 
 
-
-
 uint16_t ext_events() {
+
   static uint32_t notify_self = millis();
   if ( millis() - notify_self >= NODE_KEEPALIVE ) { // broadcast self to network
     notify_self = millis();
@@ -1182,7 +2193,14 @@ uint16_t ext_events() {
     for ( uint16_t i = 0; i < CANquitto::nodeBus.size(); i++ ) {
       static uint32_t node_scan[3]; // remove expired nodes from active list
       CANquitto::nodeBus.peek_front(node_scan, 3, i);
-      if ( millis() - node_scan[2] > NODE_UPTIME_LIMIT ) CANquitto::nodeBus.findRemove(node_scan, 3, 0, 1, 2);
+      if ( millis() - node_scan[2] > NODE_UPTIME_LIMIT ) {
+        AsyncCQ info;
+        info.node = node_scan[0];
+        info.bus = node_scan[1];
+        info.state = NODE_LOST;
+        if ( CANquitto::detect_handler ) CANquitto::detect_handler(info);
+        CANquitto::nodeBus.findRemove(node_scan, 3, 0, 1, 2);
+      }
     }
   }
 
@@ -1226,33 +2244,6 @@ uint16_t ext_events() {
   }
   return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 
