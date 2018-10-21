@@ -124,6 +124,7 @@ class CANquitto {
     static volatile int readbuf_response_flag;
     static volatile int wire_response_flag;
     static volatile int spi_response_flag;
+    static volatile int touchread_response_flag;
     static volatile uint8_t readbuf_response[6];
     static uint32_t nodeNetID;
     static uint32_t nodeID;
@@ -143,6 +144,7 @@ class CANquitto {
     uint8_t digitalReadFast(uint8_t pin) { return digitalRead(pin); }
     void pinMode(uint8_t pin, uint8_t mode);
     int digitalRead(uint8_t pin);
+    int touchRead(uint8_t pin);
     void toggle(uint8_t pin);
     int analogRead(uint8_t pin);
     void analogReadResolution(unsigned int bits);
