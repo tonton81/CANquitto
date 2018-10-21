@@ -57,6 +57,7 @@ volatile int CANquitto::read_response = 0;
 volatile int CANquitto::readbuf_response_flag = 0;
 volatile int CANquitto::wire_response_flag = 0;
 volatile int CANquitto::spi_response_flag = 0;
+volatile int CANquitto::touchread_response_flag = 0;
 volatile uint8_t CANquitto::readbuf_response[6] = { 0 };
 
 CANquitto::CANquitto(uint8_t nodeToControl) {
@@ -748,6 +749,25 @@ uint8_t CANquitto::NodeFeatures::setCS(uint8_t pin) {
   return -1;
 }
 
+int CANquitto::touchRead(uint8_t pin) {
+  if ( !CANquitto::isOnline(Serial.featuredNode) ) return -1;
+  CAN_message_t msg;
+  msg.ext = 1;
+  msg.id = CANquitto::nodeNetID | Serial.featuredNode << 7 | CANquitto::nodeID | 5UL << 14;
+  CANquitto::touchread_response_flag = -1;
+  msg.buf[0] = 1; // 
+  msg.buf[1] = 0; // SPACEHOLDER
+  msg.buf[2] = 6; // 
+  msg.buf[3] = pin; 
+  IFCT& bus = CANquitto::node_bus(Serial.featuredNode);
+  bus.write(msg);
+  uint32_t timeout = millis();
+  while ( CANquitto::touchread_response_flag == -1 ) {
+    if ( millis() - timeout > 200 ) return -1;
+  }
+  return CANquitto::touchread_response_flag;
+}
+
 uint8_t CANquitto::NodeFeatures::endTransmission(void) {
   if ( !CANquitto::isOnline(featuredNode) ) return -1;
   if ( wire_access ) return endTransmission(true);
@@ -1346,6 +1366,7 @@ void ext_output(const CAN_message_t &msg) {
           if ( msg.buf[1] == 2 && msg.buf[2] == 6 ) CANquitto::wire_response_flag = (int)(msg.buf[3] << 24) | msg.buf[4] << 16 | msg.buf[5] << 8 | msg.buf[6];
           if ( msg.buf[1] == 2 && msg.buf[2] == 7 ) CANquitto::spi_response_flag = msg.buf[3];
           if ( msg.buf[1] == 2 && msg.buf[2] == 8 ) CANquitto::spi_response_flag = (uint16_t)(msg.buf[3] << 8) | msg.buf[4];
+          if ( msg.buf[1] == 2 && msg.buf[2] == 9 ) CANquitto::touchread_response_flag = (uint16_t)(msg.buf[3] << 8) | msg.buf[4];
           if ( msg.buf[1] == 3 ) {
             CANquitto::readbuf_response_flag = 1;
             CANquitto::readbuf_response[0] = msg.buf[2];
@@ -1426,6 +1447,33 @@ void ext_output(const CAN_message_t &msg) {
                     }
                   case 5: {
                       analogReadResolution(msg.buf[3]);
+                      break;
+                    }
+                  case 6: {
+                      CAN_message_t response;
+                      response.buf[1] = 2; // HARDWARE PINS RESPONSE
+                      response.buf[2] = 9; // TOUCHREAD
+                      response.ext = 1;
+                      response.id = (CANquitto::nodeNetID | (msg.id & 0x7F) << 7 | CANquitto::nodeID | (4UL << 14));
+                      int value = touchRead(msg.buf[3]);
+                      response.buf[3] = value >> 8;
+                      response.buf[4] = value;
+                      if ( !msg.bus ) Can0.write(response);
+#if defined(__MK66FX1M0__)
+                      else Can1.write(response);
+#endif
+                      break;
+                    }
+                  case 7: {
+                      break;
+                    }
+                  case 8: {
+                      break;
+                    }
+                  case 9: {
+                      break;
+                    }
+                  case 10: {
                       break;
                     }
                 }
@@ -2152,11 +2200,38 @@ void ext_output(const CAN_message_t &msg) {
           }
           break;
         }
-      case 6: { /* UNUSED */
+      case 6: { /* OTHER */
           switch ( msg.buf[1] ) { /* SPACEHOLDER */
             case 0: {
                 switch ( msg.buf[2] ) {
                   case 0: {
+                      break;
+                    }
+                  case 1: {
+                      break;
+                    }
+                  case 2: {
+                      break;
+                    }
+                  case 3: {
+                      break;
+                    }
+                  case 4: {
+                      break;
+                    }
+                  case 5: {
+                      break;
+                    }
+                  case 6: {
+                      break;
+                    }
+                  case 7: {
+                      break;
+                    }
+                  case 8: {
+                      break;
+                    }
+                  case 9: {
                       break;
                     }
                 }
